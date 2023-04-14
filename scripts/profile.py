@@ -5,7 +5,7 @@ import subprocess
 import pandas as pd
 
 NUM_THREADS_PER_BLOCK = 256
-NUM_SMS = 82
+NUM_SMS = 128
 BASE_STEP = 10
 DIR_PATH = "/tmp/profile_blocks__megakernel_events"
 # only take action when the change of config for certain node can contribute to at least 0.1% overall acceleration
