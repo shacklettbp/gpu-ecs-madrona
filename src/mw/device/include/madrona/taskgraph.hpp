@@ -20,10 +20,6 @@ namespace madrona {
 
 class TaskGraph;
 
-namespace mwGPU {
-    inline TaskGraph * getTaskGraph();
-}
-
 struct NodeBase {
     uint32_t numDynamicInvocations;
 };
@@ -64,7 +60,8 @@ public:
     public:
         Builder(int32_t max_nodes,
                 int32_t max_node_datas,
-                int32_t max_num_dependencies);
+                int32_t max_num_dependencies,
+                int32_t world_idx);
         ~Builder();
 
         template <typename NodeT, typename... Args>
@@ -95,6 +92,8 @@ public:
 
         void build(TaskGraph *out);
 
+        inline int32_t worldIDX() const { return world_idx_; }
+
     private:
         template <typename NodeT>
         static void dynamicCountWrapper(NodeT *node, int32_t);
@@ -119,7 +118,7 @@ public:
         int32_t num_datas_;
         NodeID *all_dependencies_;
         uint32_t num_dependencies_;
-        uint32_t num_worlds_;
+        int32_t world_idx_;
     };
 
     enum class WorkerState {
@@ -133,15 +132,7 @@ public:
 
     ~TaskGraph();
 
-    void init(int32_t start_node_idx, int32_t end_node_idx,
-              int32_t num_blocks_per_sm);
-
-    WorkerState getWork(NodeBase **node_data,
-                        uint32_t *run_func_id,
-                        uint32_t *run_node_id,
-                        int32_t *run_offset);
-
-    void finishWork(bool lane_executed);
+    inline void execute();
 
     static inline WorldBase * getWorld(int32_t world_idx);
 
@@ -154,25 +145,16 @@ public:
     template <typename NodeT>
     NodeT & getNodeData(TypedDataID<NodeT> data_id);
 
-    struct BlockState;
 private:
     template <typename ContextT, bool> struct WorldTypeExtract;
 
-    TaskGraph(Node *nodes, uint32_t num_nodes, NodeData *node_datas);
-
-    inline void updateBlockState();
-    inline uint32_t computeNumInvocations(Node &node);
+    TaskGraph(Node *nodes, uint32_t num_nodes, NodeData *node_datas,
+              int32_t world_idx);
 
     Node *sorted_nodes_;
     uint32_t num_nodes_;
-    uint32_t end_node_idx_;
     NodeData *node_datas_;
-    AtomicU32 cur_node_idx_;
-// #ifdef LIMIT_ACTIVE_BLOCKS
-//     AtomicU32 block_sm_offsets_[MADRONA_MWGPU_NUM_MEGAKERNEL_NUM_SMS];
-// #endif
-    FixedInlineArray<cuda::barrier<cuda::thread_scope_device>,
-                     consts::maxMegakernelBlocksPerSM> init_barriers_;
+    int32_t world_idx_;
 
 friend class Builder;
 };
@@ -183,10 +165,9 @@ template <typename ContextT, auto Fn,
           typename ...ComponentTs>
 class CustomParallelForNode: public NodeBase {
 public:
-    CustomParallelForNode();
+    CustomParallelForNode(int32_t world_idx);
 
     inline void run(const int32_t invocation_idx);
-    inline uint32_t numInvocations();
 
     static TaskGraph::NodeID addToGraph(
             TaskGraph::Builder &builder,
@@ -203,7 +184,7 @@ using ParallelForNode =
 struct ClearTmpNodeBase : NodeBase {
     ClearTmpNodeBase(uint32_t archetype_id);
 
-    void run(int32_t);
+    void run(int32_t world_idx);
 
     static TaskGraph::NodeID addToGraph(
         TaskGraph::Builder &builder,
@@ -220,123 +201,9 @@ struct ClearTmpNode : ClearTmpNodeBase {
         Span<const TaskGraph::NodeID> dependencies);
 };
 
-struct RecycleEntitiesNode : NodeBase {
-    RecycleEntitiesNode();
-
-    void run(int32_t invocation_idx);
-    uint32_t numInvocations();
-
-    static TaskGraph::NodeID addToGraph(
-        TaskGraph::Builder &builder,
-        Span<const TaskGraph::NodeID> dependencies);
-
-    int32_t recycleBase;
-};
-
 struct ResetTmpAllocNode : NodeBase {
-    void run(int32_t);
+    void run(int32_t world_idx);
 
-    static TaskGraph::NodeID addToGraph(
-        TaskGraph::Builder &builder,
-        Span<const TaskGraph::NodeID> dependencies);
-};
-
-struct CompactArchetypeNodeBase : NodeBase {
-    CompactArchetypeNodeBase(uint32_t archetype_id);
-
-    void run(int32_t invocation_idx);
-    uint32_t numInvocations();
-
-    static TaskGraph::NodeID addToGraph(
-        TaskGraph::Builder &builder,
-        Span<const TaskGraph::NodeID> dependencies,
-        uint32_t archetype_id);
-
-    uint32_t archetypeID;
-};
-
-template <typename ArchetypeT>
-struct CompactArchetypeNode : CompactArchetypeNodeBase {
-    static TaskGraph::NodeID addToGraph(
-        TaskGraph::Builder &builder,
-        Span<const TaskGraph::NodeID> dependencies);
-};
-
-struct SortArchetypeNodeBase : NodeBase {
-    struct RadixSortOnesweepCustom;
-
-    using ParentNodeT = TaskGraph::TypedDataID<SortArchetypeNodeBase>;
-    struct OnesweepNode : NodeBase {
-        OnesweepNode(ParentNodeT parent, int32_t pass, bool final_pass);
-        ParentNodeT parentNode;
-        int32_t passIDX;
-        bool finalPass;
-        uint32_t *srcKeys;
-        uint32_t *dstKeys;
-        int *srcVals;
-        int *dstVals;
-
-        void prepareOnesweep(int32_t invocation_idx);
-        void onesweep(int32_t invocation_idx);
-    };
-
-    struct RearrangeNode : NodeBase {
-        RearrangeNode(ParentNodeT parent, int32_t col_idx);
-        TaskGraph::TypedDataID<SortArchetypeNodeBase> parentNode;
-        int32_t columnIndex;
-        TaskGraph::TypedDataID<RearrangeNode> nextRearrangeNode;
-
-        void stageColumn(int32_t invocation_idx);
-        void rearrangeEntities(int32_t invocation_idx);
-        void rearrangeColumn(int32_t invocation_idx);
-    };
-
-    SortArchetypeNodeBase(uint32_t archetype_id,
-                          int32_t col_idx,
-                          uint32_t *keys_col,
-                          int32_t num_passes);
-
-    void sortSetup(int32_t);
-    void zeroBins(int32_t invocation_idx);
-    void histogram(int32_t invocation_idx);
-    void binScan(int32_t invocation_idx);
-    void resizeTable(int32_t);
-    void copyKeys(int32_t invocation_idx);
-
-    static TaskGraph::NodeID addToGraph(
-        TaskGraph::Builder &builder,
-        Span<const TaskGraph::NodeID> dependencies,
-        uint32_t archetype_id,
-        int32_t component_id);
-
-    // Constant state
-    uint32_t archetypeID;
-    int32_t sortColumnIndex;
-    uint32_t *keysCol;
-    int32_t numPasses;
-
-    TaskGraph::TypedDataID<OnesweepNode> onesweepNodes[4];
-    TaskGraph::TypedDataID<RearrangeNode> firstRearrangePassData;
-
-    // Per-run state
-    uint32_t numRows;
-    uint32_t numSortBlocks;
-    uint32_t numSortThreads;
-    uint32_t postBinScanThreads;
-    int *indicesFinal; // Points to either indices or indicesAlt
-    void *columnStaging;
-    int *indices;
-    int *indicesAlt;
-    uint32_t *keysAlt;
-    int32_t *bins;
-    int32_t *lookback;
-    int32_t *counters;
-
-    static inline constexpr uint32_t num_elems_per_sort_thread_ = 2;
-};
-
-template <typename ArchetypeT, typename ComponentT>
-struct SortArchetypeNode : SortArchetypeNodeBase {
     static TaskGraph::NodeID addToGraph(
         TaskGraph::Builder &builder,
         Span<const TaskGraph::NodeID> dependencies);

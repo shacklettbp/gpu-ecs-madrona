@@ -5,13 +5,15 @@ namespace madrona {
 
 TaskGraph::Builder::Builder(int32_t max_num_nodes,
                             int32_t max_node_datas,
-                            int32_t max_num_dependencies)
+                            int32_t max_num_dependencies,
+                            int32_t world_idx)
     : staged_((StagedNode *)rawAlloc(sizeof(StagedNode) * max_num_nodes)),
       num_nodes_(0),
       node_datas_((NodeData *)rawAlloc(sizeof(NodeData) * max_node_datas)),
       num_datas_(0),
       all_dependencies_((NodeID *)rawAlloc(sizeof(NodeID) * max_num_dependencies)),
-      num_dependencies_(0)
+      num_dependencies_(0),
+      world_idx_(world_idx)
 {}
 
 TaskGraph::Builder::~Builder()
@@ -50,7 +52,7 @@ TaskGraph::NodeID TaskGraph::Builder::registerNode(
             0,
             num_threads_per_invocation,
             0,
-            0,
+0,
             0,
         },
         parent_node.has_value() ? parent_node->id : -1,
@@ -134,7 +136,7 @@ void TaskGraph::Builder::build(TaskGraph *out)
     auto tg_datas = (NodeData *)rawAlloc(sizeof(NodeData) * num_datas_);
     memcpy(tg_datas, node_datas_, sizeof(NodeData) * num_datas_);
 
-    new (out) TaskGraph(sorted_nodes, num_nodes_, tg_datas);
+    new (out) TaskGraph(sorted_nodes, num_nodes_, tg_datas, world_idx_);
 }
 
 ClearTmpNodeBase::ClearTmpNodeBase(uint32_t archetype_id)
@@ -142,9 +144,11 @@ ClearTmpNodeBase::ClearTmpNodeBase(uint32_t archetype_id)
       archetypeID(archetype_id)
 {}
 
-void ClearTmpNodeBase::run(int32_t)
+void ClearTmpNodeBase::run(int32_t world_idx)
 {
-    StateManager *state_mgr = mwGPU::getStateManager();
+    StateManager *state_mgr = 
+        &((StateManager *)mwGPU::GPUImplConsts::get().stateManagerAddr)[world_idx];
+
     state_mgr->clearTemporaries(archetypeID);
 }
 
@@ -156,39 +160,12 @@ TaskGraph::NodeID ClearTmpNodeBase::addToGraph(
     return builder.addOneOffNode<ClearTmpNodeBase>(dependencies, archetype_id);
 }
 
-RecycleEntitiesNode::RecycleEntitiesNode()
-    : NodeBase(),
-      recycleBase(0)
-{}
-
-void RecycleEntitiesNode::run(int32_t invocation_idx)
+void ResetTmpAllocNode::run(int32_t world_idx)
 {
-    mwGPU::getStateManager()->recycleEntities(
-        invocation_idx, recycleBase);
-}
-
-uint32_t RecycleEntitiesNode::numInvocations()
-{
-    auto [recycle_base, num_deleted] =
-        mwGPU::getStateManager()->fetchRecyclableEntities();
-
-    if (num_deleted > 0) {
-        recycleBase = recycle_base;
-    }
-
-    return num_deleted;
-}
-
-TaskGraph::NodeID RecycleEntitiesNode::addToGraph(
-    TaskGraph::Builder &builder,
-    Span<const TaskGraph::NodeID> dependencies)
-{
-    return builder.addDynamicCountNode<RecycleEntitiesNode>(dependencies, 1);
-}
-
-void ResetTmpAllocNode::run(int32_t)
-{
-    mwGPU::TmpAllocator::get().reset();
+    StateManager *state_mgr = 
+        &((StateManager *)mwGPU::GPUImplConsts::get().stateManagerAddr)[world_idx];
+    
+    state_mgr->resetTmp();
 }
 
 TaskGraph::NodeID ResetTmpAllocNode::addToGraph(
@@ -196,37 +173,6 @@ TaskGraph::NodeID ResetTmpAllocNode::addToGraph(
     Span<const TaskGraph::NodeID> dependencies)
 {
     return builder.addOneOffNode<ResetTmpAllocNode>(dependencies);
-}
-
-CompactArchetypeNodeBase::CompactArchetypeNodeBase(uint32_t archetype_id)
-    : NodeBase(),
-      archetypeID(archetype_id)
-{}
-
-void CompactArchetypeNodeBase::run(int32_t invocation_idx)
-{
-#if 0
-    uint32_t archetype_id = data.compactArchetype.archetypeID;
-    StateManager *state_mgr = mwGPU::getStateManager();
-#endif
-
-    // Actually compact
-    assert(false);
-}
-
-uint32_t CompactArchetypeNodeBase::numInvocations()
-{
-    assert(false);
-    return mwGPU::getStateManager()->numArchetypeRows(archetypeID);
-}
-
-TaskGraph::NodeID CompactArchetypeNodeBase::addToGraph(
-    TaskGraph::Builder &builder,
-    Span<const TaskGraph::NodeID> dependencies,
-    uint32_t archetype_id)
-{
-    return builder.addDynamicCountNode<CompactArchetypeNodeBase>(
-        dependencies, 1, archetype_id);
 }
 
 }

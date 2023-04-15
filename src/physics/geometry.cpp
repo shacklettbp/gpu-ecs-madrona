@@ -1,4 +1,4 @@
-#ifndef MADRONA_GPU_MODE
+#if !defined(MADRONA_GPU_MODE) && !defined(MADRONA_GPU_HACK_MODE)
 #include <cstdlib>
 #include <map>
 #endif
@@ -52,7 +52,7 @@ void FastPolygonList::addPolygon(Span<const uint32_t> indices)
 void HalfEdgeMesh::construct(
         FastPolygonList &polygons,
         uint32_t vertexCount, const math::Vector3 *vertices) {
-#ifndef MADRONA_GPU_MODE
+#if !defined (MADRONA_GPU_MODE) && !defined(MADRONA_GPU_HACK_MODE)
     static HalfEdge dummy = {};
 
     // Allocate all temporary things

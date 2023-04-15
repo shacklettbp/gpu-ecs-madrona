@@ -109,7 +109,6 @@ private:
             }
 
 
-            std::cout << "GPU debug print:\n";
             std::string_view print_str = channel_->buffer;
             size_t buffer_offset = print_str.length() + 1;
             size_t str_offset = 0;
@@ -798,10 +797,7 @@ static __attribute__((always_inline)) inline void dispatch(
             "(int32_t start_node_idx, int32_t end_node_idx)\n";
 
         megakernel_postfix += R"__({
-    madrona::mwGPU::megakernelImpl(start_node_idx, end_node_idx, )__";
-        megakernel_postfix += std::to_string(megakernel_cfg.numBlocksPerSM);
-
-        megakernel_postfix += R"__();
+    madrona::mwGPU::megakernelImpl();
 }
 )__";
 
@@ -1426,14 +1422,20 @@ static GPUEngineState initEngineAndUserState(
         launchKernel(gpu_kernels.megakernels[0], 1,
                      consts::numMegakernelThreads, no_args);
     } else if (exec_mode == CompileConfig::Executor::TaskGraph) {
-        launchKernel(gpu_kernels.initECS, 1, 1, init_ecs_args);
-
         uint32_t num_init_blocks =
             utils::divideRoundUp(num_worlds, consts::numMegakernelThreads);
 
+        launchKernel(gpu_kernels.initECS,
+                     num_init_blocks,
+                     consts::numMegakernelThreads,
+                     init_ecs_args);
+
         launchKernel(gpu_kernels.initWorlds, num_init_blocks,
                      consts::numMegakernelThreads, init_worlds_args);
-        launchKernel(gpu_kernels.initTasks, 1, 1, init_tasks_args);
+        launchKernel(gpu_kernels.initTasks,
+                     num_init_blocks,
+                     consts::numMegakernelThreads,
+                     init_tasks_args);
     }
 
     REQ_CUDA(cudaStreamSynchronize(strm));
@@ -1730,7 +1732,7 @@ static CUgraphExec makeTaskGraphRunGraph(
 }
 
 MADRONA_EXPORT MWCudaExecutor::MWCudaExecutor(
-        const StateConfig &state_cfg, const CompileConfig &compile_cfg)
+        const StateConfig &state_cfg, const CompileConfig &o_compile_cfg)
     : impl_(nullptr)
 {
     REQ_CUDA(cudaSetDevice(state_cfg.gpuID));

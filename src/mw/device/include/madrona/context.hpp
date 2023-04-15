@@ -102,6 +102,7 @@ private:
     };
 
     WorldID world_id_;
+    StateManager *state_mgr_;
 #if 0
     inline StateManager & state();
 

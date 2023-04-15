@@ -14,20 +14,18 @@ __launch_bounds__(madrona::consts::numMegakernelThreads, 1)
 __global__ void initECS(HostAllocInit alloc_init, void *print_channel,
                         void **exported_columns, void *cfg)
 {
-    HostAllocator *host_alloc = mwGPU::getHostAllocator();
-    new (host_alloc) HostAllocator(alloc_init);
+    int world_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if (world_idx >= mwGPU::GPUImplConsts::get().numWorlds) {
+        return;
+    }
 
-    auto host_print = (HostPrint *)GPUImplConsts::get().hostPrintAddr;
-    new (host_print) HostPrint(print_channel);
+    if (world_idx == 0) {
+        auto host_print = (HostPrint *)GPUImplConsts::get().hostPrintAddr;
+        new (host_print) HostPrint(print_channel);
+    }
 
-    TmpAllocator &tmp_alloc = TmpAllocator::get();
-    new (&tmp_alloc) TmpAllocator();
-
-#ifdef MADRONA_TRACING
-    new (&DeviceTracing::get()) DeviceTracing();
-#endif
-
-    StateManager *state_mgr = mwGPU::getStateManager();
+    StateManager *state_mgr =
+        &((StateManager *)mwGPU::GPUImplConsts::get().stateManagerAddr)[world_idx];
     new (state_mgr) StateManager(0);
 
     ECSRegistry ecs_registry(*state_mgr, exported_columns);
@@ -64,10 +62,17 @@ template <typename ContextT, typename WorldT, typename ConfigT, typename InitT>
 __launch_bounds__(madrona::consts::numMegakernelThreads, 1)
 __global__ void initTasks(void *cfg)
 {
-    TaskGraph::Builder builder(1024, 1024 * 2, 1024 * 5);
+    int world_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if (world_idx >= mwGPU::GPUImplConsts::get().numWorlds) {
+        return;
+    }
+
+    auto tg = &((TaskGraph *)GPUImplConsts::get().taskGraph)[world_idx];
+
+    TaskGraph::Builder builder(300, 300, 300, world_idx);
     WorldT::setupTasks(builder, *(ConfigT *)cfg);
 
-    builder.build((TaskGraph *)mwGPU::GPUImplConsts::get().taskGraph);
+    builder.build(tg);
 }
 
 }

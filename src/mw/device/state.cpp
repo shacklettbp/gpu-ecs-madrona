@@ -10,65 +10,37 @@
 
 namespace madrona {
 
-Table::Table()
-    : columns(),
-      columnSizes(),
-      columnMappedBytes(),
-      maxColumnSize(),
-      numColumns(),
-      numRows(0),
-      mappedRows(0),
-      growLock()
-{}
-
 static MADRONA_NO_INLINE void growTable(Table &tbl, int32_t row)
 {
     using namespace mwGPU;
 
-    tbl.growLock.lock();
+    int32_t cur_num_rows = tbl.numAllocatedRows;
+    int32_t new_num_rows = cur_num_rows * 2;
 
-    if (tbl.mappedRows > row) {
-        tbl.growLock.unlock();
-        return;
+    if (new_num_rows - cur_num_rows > 10000) {
+        new_num_rows = cur_num_rows + 10000; 
     }
 
-    HostAllocator *alloc = getHostAllocator();
-    
-    int32_t new_num_rows = tbl.mappedRows * 2;
-
-    if (new_num_rows - tbl.mappedRows > 500'000) {
-        new_num_rows = tbl.mappedRows + 500'000;
-    }
-
-    int32_t min_mapped_rows = Table::maxRowsPerTable;
     for (int32_t i = 0; i < tbl.numColumns; i++) {
-        void *column_base = tbl.columns[i];
+        void *cur_col = tbl.columns[i];
         uint64_t column_bytes_per_row = tbl.columnSizes[i];
-        uint64_t cur_mapped_bytes = tbl.columnMappedBytes[i];
 
-        int32_t cur_max_rows = cur_mapped_bytes / column_bytes_per_row;
+        uint64_t cur_num_bytes =
+            cur_num_rows * column_bytes_per_row;
+        
+        uint64_t new_num_bytes =
+            new_num_rows * column_bytes_per_row;
 
-        if (cur_max_rows >= new_num_rows) {
-            min_mapped_rows = min(cur_max_rows, min_mapped_rows);
-            continue;
-        }
+        void *new_col = rawAlloc(new_num_bytes);
 
-        uint64_t new_mapped_bytes = column_bytes_per_row * new_num_rows;
-        new_mapped_bytes = alloc->roundUpAlloc(new_mapped_bytes);
+        memcpy(new_col, cur_col, cur_num_bytes);
 
-        uint64_t mapped_bytes_diff = new_mapped_bytes - cur_mapped_bytes;
-        void *grow_base = (char *)column_base + cur_mapped_bytes;
-        alloc->mapMemory(grow_base, mapped_bytes_diff);
+        rawDealloc(cur_col);
 
-        int32_t new_max_rows = new_mapped_bytes / column_bytes_per_row;
-        min_mapped_rows = min(new_max_rows, min_mapped_rows);
-
-        tbl.columnMappedBytes[i] = new_mapped_bytes;
+        tbl.columns[i] = new_col;
     }
 
-    tbl.mappedRows = min_mapped_rows;
-    
-    tbl.growLock.unlock();
+    tbl.numAllocatedRows = new_num_rows;
 }
 
 ECSRegistry::ECSRegistry(StateManager &state_mgr, void **export_ptr)
@@ -92,53 +64,23 @@ StateManager::StateManager(uint32_t)
         Optional<ArchetypeStore>::noneAt(&archetypes_[i]);
     }
 
-    // Initialize entity store
-    HostAllocator *alloc = getHostAllocator();
-
-    uint32_t init_mapped_entities = 1'048'576;
-    uint32_t max_mapped_entities = 2'147'483'648;
-
-    uint64_t reserve_entity_bytes =
-        (uint64_t)max_mapped_entities * sizeof(EntityStore::EntitySlot);
-    uint64_t reserve_idx_bytes =
-        (uint64_t)max_mapped_entities * sizeof(int32_t);
-
-    reserve_entity_bytes = alloc->roundUpReservation(reserve_entity_bytes);
-    reserve_idx_bytes = alloc->roundUpReservation(reserve_idx_bytes);
-
-    uint64_t init_entity_bytes =
-        (uint64_t)init_mapped_entities * sizeof(EntityStore::EntitySlot);
-    uint64_t init_idx_bytes =
-        (uint64_t)init_mapped_entities * sizeof(int32_t);
-
-    entity_store_.numSlotGrowBytes = alloc->roundUpAlloc(init_entity_bytes);
-
-    entity_store_.numIdxGrowBytes = alloc->roundUpAlloc(init_idx_bytes);
-
-    // FIXME technically we should find some kind of common multiple here
-    assert(entity_store_.numSlotGrowBytes / sizeof(EntityStore::EntitySlot) ==
-           init_mapped_entities);
-    assert(entity_store_.numIdxGrowBytes / sizeof(int32_t) ==
-           init_mapped_entities);
-
-    entity_store_.entities = (EntityStore::EntitySlot *)alloc->reserveMemory(
-        reserve_entity_bytes, entity_store_.numSlotGrowBytes);
-
-    entity_store_.availableEntities = (int32_t *)alloc->reserveMemory(
-        reserve_entity_bytes, entity_store_.numIdxGrowBytes);
-    entity_store_.deletedEntities = (int32_t *)alloc->reserveMemory(
-        reserve_entity_bytes, entity_store_.numIdxGrowBytes);
-
-    entity_store_.numGrowEntities = init_mapped_entities;
-    entity_store_.numMappedEntities = init_mapped_entities;
-
-    for (int32_t i = 0; i < init_mapped_entities; i++) {
+#pragma unroll(1)
+    for (int32_t i = 0; i < EntityStore::maxNumEntities; i++) {
         entity_store_.entities[i].gen = 0;
-        entity_store_.availableEntities[i] = i;
     }
 
+    entity_store_.numFreeEntities = EntityStore::maxNumEntities;
+
+#pragma unroll(1)
+    for (int32_t i = 0; i < EntityStore::maxNumEntities / 64; i++) {
+        entity_store_.freeEntities[i] = 0xFFFF'FFFF;
+    }
+    entity_store_.numFreeEntities = EntityStore::maxNumEntities;
+
     registerComponent<Entity>();
-    registerComponent<WorldID>();
+
+    num_queries_ = 0;
+    tmp_alloc_head_ = nullptr;
 }
 
 void StateManager::registerComponent(uint32_t id, uint32_t alignment,
@@ -163,36 +105,17 @@ StateManager::ArchetypeStore::ArchetypeStore(uint32_t offset,
 {
     using namespace mwGPU;
 
-    uint32_t num_worlds = GPUImplConsts::get().numWorlds;
-    HostAllocator *alloc = getHostAllocator();
-
     tbl.numColumns = num_columns;
-    tbl.numRows.store_relaxed(0);
 
-    int32_t min_mapped_rows = Table::maxRowsPerTable;
-
-    uint32_t max_column_size = 0;
     for (int i = 0 ; i < (int)num_columns; i++) {
-        uint64_t reserve_bytes = (uint64_t)type_infos[i].numBytes *
-            (uint64_t)Table::maxRowsPerTable;
-        reserve_bytes = alloc->roundUpReservation(reserve_bytes);
+        uint64_t col_bytes = (uint64_t)type_infos[i].numBytes;
 
-        uint64_t init_bytes =
-            (uint64_t)type_infos[i].numBytes * (uint64_t)num_worlds;
-        init_bytes = alloc->roundUpAlloc(init_bytes);
-
-        tbl.columns[i] = alloc->reserveMemory(reserve_bytes, init_bytes);
-        tbl.columnSizes[i] = type_infos[i].numBytes;
-        tbl.columnMappedBytes[i] = init_bytes;
-
-        max_column_size = std::max(tbl.columnSizes[i], max_column_size);
-
-        int num_mapped_in_column = init_bytes / tbl.columnSizes[i];
-
-        min_mapped_rows = min(num_mapped_in_column, min_mapped_rows);
+        tbl.columns[i] = rawAlloc(col_bytes);
+        tbl.columnSizes[i] = col_bytes;
     }
-    tbl.maxColumnSize = max_column_size;
-    tbl.mappedRows = min_mapped_rows;
+
+    tbl.numRows = 0;
+    tbl.numAllocatedRows = 1;
 }
 
 void StateManager::registerArchetype(uint32_t id, ComponentID *components,
@@ -201,7 +124,7 @@ void StateManager::registerArchetype(uint32_t id, ComponentID *components,
     uint32_t offset = archetype_component_offset_;
     archetype_component_offset_ += num_user_components;
 
-    uint32_t num_total_components = num_user_components + 2;
+    uint32_t num_total_components = num_user_components + 1;
 
     std::array<TypeInfo, max_archetype_components_> type_infos;
     std::array<IntegerMapPair, max_archetype_components_> lookup_input;
@@ -213,19 +136,9 @@ void StateManager::registerArchetype(uint32_t id, ComponentID *components,
     *type_ptr = *components_[0];
     type_ptr++;
 
-    // Add world ID column as second column of every table
-    *type_ptr = *components_[1];
-    type_ptr++;
-
     *lookup_input_ptr = {
         TypeTracker::typeID<Entity>(),
         0,
-    };
-    lookup_input_ptr++;
-
-    *lookup_input_ptr = {
-        TypeTracker::typeID<WorldID>(),
-        1,
     };
     lookup_input_ptr++;
 
@@ -252,12 +165,6 @@ void StateManager::makeQuery(const uint32_t *components,
                              uint32_t num_components,
                              QueryRef *query_ref)
 {
-    query_data_lock_.lock();
-
-    if (query_ref->numMatchingArchetypes != 0xFFFF'FFFF) {
-        return;
-    }
-
     uint32_t query_offset = query_data_offset_;
 
     uint32_t num_matching_archetypes = 0;
@@ -293,8 +200,6 @@ void StateManager::makeQuery(const uint32_t *components,
             assert(component != TypeTracker::unassignedTypeID);
             if (component == TypeTracker::typeID<Entity>()) {
                 query_data_[query_data_offset_++] = 0;
-            } else if (component == TypeTracker::typeID<WorldID>()) {
-                query_data_[query_data_offset_++] = 1;
             } else {
                 query_data_[query_data_offset_++] = 
                     archetype.columnLookup[component];
@@ -302,58 +207,33 @@ void StateManager::makeQuery(const uint32_t *components,
         }
     }
 
+    assert(query_data_offset_ < 512);
+
     query_ref->offset = query_offset;
     query_ref->numMatchingArchetypes = num_matching_archetypes;
     query_ref->numComponents = num_components;
-
-    query_data_lock_.unlock();
 }
 
 static inline int32_t getEntitySlot(EntityStore &entity_store)
 {
-    int32_t available_idx =
-        entity_store.availableOffset.fetch_add_relaxed(1);
+    assert(entity_store.numFreeEntities >= 1);
 
-    if (available_idx < entity_store.numMappedEntities) [[likely]] {
-        return entity_store.availableEntities[available_idx];
+    int32_t free_idx;
+    for (int32_t i = 0; i < EntityStore::maxNumEntities / 32; i++) {
+        uint32_t free_mask = entity_store.freeEntities[i];
+        if (free_mask == 0) continue;
+
+        int32_t free_offset = __ffs(free_mask);
+        entity_store.freeEntities[i] = free_mask & ~(1 << (free_offset - 1));
+
+        free_idx = i * 32 + free_offset;
+
+        break;
     }
 
-    entity_store.growLock.lock();
+    entity_store.numFreeEntities -= 1;
 
-    if (available_idx < entity_store.numMappedEntities) {
-        entity_store.growLock.unlock();
-
-        return entity_store.availableEntities[available_idx];
-    }
-
-    void *entities_grow_base = (char *)entity_store.entities +
-        (uint64_t)entity_store.numMappedEntities *
-            sizeof(EntityStore::EntitySlot);
-
-    void *available_grow_base =
-        (char *)entity_store.availableEntities +
-            (uint64_t)entity_store.numMappedEntities * sizeof(int32_t);
-
-    void *deleted_grow_base =
-        (char *)entity_store.deletedEntities +
-            (uint64_t)entity_store.numMappedEntities * sizeof(int32_t);
-
-    auto *alloc = mwGPU::getHostAllocator();
-    alloc->mapMemory(entities_grow_base, entity_store.numSlotGrowBytes);
-    alloc->mapMemory(available_grow_base, entity_store.numIdxGrowBytes);
-    alloc->mapMemory(deleted_grow_base, entity_store.numIdxGrowBytes);
-
-    for (int32_t i = 0; i < entity_store.numGrowEntities; i++) {
-        int32_t idx = i + entity_store.numMappedEntities;
-        entity_store.entities[idx].gen = 0;
-        entity_store.availableEntities[idx] = idx;
-    }
-
-    entity_store.numMappedEntities += entity_store.numGrowEntities;
-
-    entity_store.growLock.unlock();
-
-    return entity_store.availableEntities[available_idx];
+    return free_idx;
 }
 
 Entity StateManager::makeEntityNow(WorldID world_id, uint32_t archetype_id)
@@ -362,9 +242,9 @@ Entity StateManager::makeEntityNow(WorldID world_id, uint32_t archetype_id)
     archetype.needsSort = true;
     Table &tbl = archetype.tbl;
 
-    int32_t row = tbl.numRows.fetch_add_relaxed(1);
+    int32_t row = tbl.numRows++;
 
-    if (row >= tbl.mappedRows) {
+    if (row >= tbl.numAllocatedRows) {
         growTable(tbl, row);
     }
 
@@ -379,7 +259,7 @@ Entity StateManager::makeEntityNow(WorldID world_id, uint32_t archetype_id)
         entity_store_.entities[entity_slot_idx];
 
     entity_slot.loc = loc;
-    entity_slot.gen = 0;
+    entity_slot.gen += 1;
 
     // FIXME: proper entity mapping on GPU
     Entity e {
@@ -388,10 +268,8 @@ Entity StateManager::makeEntityNow(WorldID world_id, uint32_t archetype_id)
     };
 
     Entity *entity_column = (Entity *)tbl.columns[0];
-    WorldID *world_column = (WorldID *)tbl.columns[1];
 
     entity_column[row] = e;
-    world_column[row] = world_id;
 
     return e;
 }
@@ -401,9 +279,9 @@ Loc StateManager::makeTemporary(WorldID world_id,
 {
     Table &tbl = archetypes_[archetype_id]->tbl;
 
-    int32_t row = tbl.numRows.fetch_add_relaxed(1);
+    int32_t row = tbl.numRows++;
 
-    if (row >= tbl.mappedRows) {
+    if (row >= tbl.numAllocatedRows) {
         growTable(tbl, row);
     }
 
@@ -412,9 +290,6 @@ Loc StateManager::makeTemporary(WorldID world_id,
         row,
     };
 
-    WorldID *world_column = (WorldID *)tbl.columns[1];
-    world_column[row] = world_id;
-
     return loc;
 }
 
@@ -422,62 +297,45 @@ void StateManager::destroyEntityNow(Entity e)
 {
     EntityStore::EntitySlot &entity_slot =
         entity_store_.entities[e.id];
-
     entity_slot.gen++;
+
     Loc loc = entity_slot.loc;
 
-    auto &archetype = *archetypes_[loc.archetype];
-    archetype.needsSort = true;
-    Table &tbl = archetype.tbl;
-    WorldID *world_column = (WorldID *)tbl.columns[1];
-    world_column[loc.row] = WorldID { -1 };
+    int32_t mask_idx = e.id / 32;
+    int32_t mask_offset = e.id % 32;
+    entity_store_.freeEntities[mask_idx] |= 1 << mask_offset;
+    entity_store_.numFreeEntities += 1;
 
-    int32_t deleted_offset =
-        entity_store_.deletedOffset.fetch_add_relaxed(1);
+    Table &tbl = archetypes_[loc.archetype]->tbl;
+    int32_t last_row = --tbl.numRows;
+    if (loc.row == last_row) {
+        return;
+    }
 
-    entity_store_.deletedEntities[deleted_offset] = e.id;
+    for (int32_t i = 0; i < tbl.numColumns; i++) {
+        void *cur_col = tbl.columns[i];
+        uint64_t column_bytes_per_row = tbl.columnSizes[i];
+
+        memcpy((char *)cur_col + column_bytes_per_row * loc.row,
+               (char *)cur_col + column_bytes_per_row * last_row,
+               column_bytes_per_row);
+    }
 }
 
 void StateManager::clearTemporaries(uint32_t archetype_id)
 {
     Table &tbl = archetypes_[archetype_id]->tbl;
-    tbl.numRows.store_relaxed(0);
+    tbl.numRows = 0;
 }
 
 void StateManager::resizeArchetype(uint32_t archetype_id, int32_t num_rows)
 {
-    archetypes_[archetype_id]->tbl.numRows.store_relaxed(num_rows);
+    archetypes_[archetype_id]->tbl.numRows = num_rows;
 }
 
 int32_t StateManager::numArchetypeRows(uint32_t archetype_id) const
 {
-    return archetypes_[archetype_id]->tbl.numRows.load_relaxed();
-}
-
-std::pair<int32_t, int32_t> StateManager::fetchRecyclableEntities()
-{
-    int32_t num_deleted = entity_store_.deletedOffset.load_relaxed();
-
-    int32_t available_end = entity_store_.availableOffset.load_relaxed();
-
-    int32_t recycle_base = available_end - num_deleted;
-
-    if (num_deleted > 0) {
-        entity_store_.deletedOffset.store_relaxed(0);
-        entity_store_.availableOffset.store_relaxed(recycle_base);
-    }
-
-    return {
-        recycle_base,
-        num_deleted,
-    };
-}
-
-void StateManager::recycleEntities(int32_t thread_offset,
-                                   int32_t recycle_base)
-{
-    entity_store_.availableEntities[recycle_base + thread_offset] =
-        entity_store_.deletedEntities[thread_offset];
+    return archetypes_[archetype_id]->tbl.numRows;
 }
 
 }

@@ -16,7 +16,7 @@ namespace madrona {
 
 namespace utils {
 
-#ifdef MADRONA_GPU_MODE
+#ifdef MADRONA_GPU_HACK_MODE
 
 inline int __builtin_clz(int v)
 {

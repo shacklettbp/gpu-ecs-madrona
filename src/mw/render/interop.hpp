@@ -2,7 +2,7 @@
 
 #include <madrona/mw_render.hpp>
 
-#if defined(MADRONA_LINUX) or defined(MADRONA_WINDOWS) or defined(MADRONA_GPU_MODE)
+#if defined(MADRONA_LINUX) or defined(MADRONA_WINDOWS) or defined(MADRONA_GPU_HACK_MODE)
 #define MADRONA_BATCHRENDER_RT (1)
 #elif defined(MADRONA_MACOS)
 #define MADRONA_BATCHRENDER_METAL (1)
@@ -87,7 +87,7 @@ struct RendererState {
     uint64_t *blases;
     PackedViewData *packedViews;
     math::Vector3 worldOffset;
-#ifdef MADRONA_GPU_MODE
+#ifdef MADRONA_GPU_HACK_MODE
     uint32_t *count_readback;
 #endif
 #elif defined(MADRONA_BATCHRENDER_METAL)

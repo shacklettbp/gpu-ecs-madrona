@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef MADRONA_GPU_MODE
+#ifdef MADRONA_GPU_HACK_MODE
 
 #include <madrona/sync.hpp>
 
@@ -52,6 +52,6 @@ friend HostPrintCPU;
 }
 }
 
-#ifdef MADRONA_GPU_MODE
+#ifdef MADRONA_GPU_HACK_MODE
 #include "host_print.inl"
 #endif

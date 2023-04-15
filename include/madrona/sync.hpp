@@ -12,7 +12,7 @@
 
 #include <atomic>
 
-#ifndef MADRONA_GPU_MODE
+#if !defined(MADRONA_GPU_MODE) && !defined(MADRONA_GPU_HACK_MODE)
 #include <version>
 #endif
 
@@ -187,7 +187,7 @@ using AtomicI64 = Atomic<int64_t>;
 using AtomicFloat = Atomic<float>;
 using AtomicCount = Atomic<CountT>;
 
-#if defined(__cpp_lib_atomic_ref) or defined(MADRONA_GPU_MODE)
+#if defined(__cpp_lib_atomic_ref) or defined(MADRONA_GPU_MODE) or defined(MADRONA_GPU_HACK_MODE)
 #define MADRONA_STD_ATOMIC_REF
 #endif
 template <typename T>

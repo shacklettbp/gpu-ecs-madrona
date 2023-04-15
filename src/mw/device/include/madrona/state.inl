@@ -2,6 +2,8 @@
 
 #include <madrona/utils.hpp>
 
+#include <madrona/mw_gpu/host_print.hpp>
+
 namespace madrona {
 
 template <typename ComponentT>
@@ -114,18 +116,14 @@ void StateManager::registerSingleton()
     registerComponent<SingletonT>();
     registerArchetype<ArchetypeT>();
 
-    uint32_t num_worlds = mwGPU::GPUImplConsts::get().numWorlds;
-
-    for (uint32_t i = 0; i < num_worlds; i++) {
-        makeEntityNow<ArchetypeT>(WorldID { int32_t(i) });
-    }
+    makeEntityNow<ArchetypeT>(WorldID {});
 }
 
 template <typename SingletonT>
-SingletonT & StateManager::getSingleton(WorldID world_id)
+SingletonT & StateManager::getSingleton(WorldID)
 {
     SingletonT *col = getSingletonColumn<SingletonT>();
-    return col[world_id.idx];
+    return col[0];
 }
 
 template <typename... ComponentTs>
@@ -136,13 +134,13 @@ Query<ComponentTs...> StateManager::query()
         ...
     };
 
-    QueryRef *ref = &Query<ComponentTs...>::ref_;
+    QueryRef *ref = &query_refs_[num_queries_++];
 
     if (ref->numReferences.load_acquire() == 0) {
         makeQuery(component_ids.data(), component_ids.size(), ref);
     }
 
-    return Query<ComponentTs...>(true);
+    return Query<ComponentTs...>(true, ref);
 }
 
 template <typename Fn, int32_t... Indices>
@@ -159,8 +157,7 @@ void StateManager::iterateArchetypesRawImpl(QueryRef *query_ref, Fn &&fn,
 
         Table &tbl = archetypes_[archetype_idx]->tbl;
 
-        bool early_out = fn(tbl.numRows.load_relaxed(),
-            (WorldID *)(tbl.columns[1]),
+        bool early_out = fn(tbl.numRows,
             tbl.columns[query_values[Indices]] ...);
         if (early_out) {
             return;
@@ -192,7 +189,7 @@ uint32_t StateManager::numMatchingEntities(QueryRef *query_ref)
 
         Table &tbl = archetypes_[archetype_idx]->tbl;
 
-        total_rows += tbl.numRows.load_relaxed();
+        total_rows += tbl.numRows;
 
         query_values += 1 + num_components;
     }
@@ -233,6 +230,7 @@ template <typename ComponentT>
 ComponentT & StateManager::getUnsafe(Entity e)
 {
     const EntityStore::EntitySlot &slot = entity_store_.entities[e.id];
+
     assert(slot.gen == e.gen);
 
     return getUnsafe<ComponentT>(slot.loc);
@@ -332,12 +330,6 @@ int32_t StateManager::getArchetypeNumColumns(uint32_t archetype_id)
     return archetype.tbl.numColumns;
 }
 
-uint32_t StateManager::getArchetypeMaxColumnSize(uint32_t archetype_id)
-{
-    auto &archetype = *archetypes_[archetype_id];
-    return archetype.tbl.maxColumnSize;
-}
-
 void StateManager::remapEntity(Entity e, int32_t row_idx)
 {
     entity_store_.entities[e.id].loc.row = row_idx;
@@ -350,10 +342,10 @@ SingletonT * StateManager::getSingletonColumn()
     uint32_t archetype_id = TypeTracker::typeID<ArchetypeT>();
 
     // Abuse the fact that the singleton only has one component that is going
-    // to be in column 2
+    // to be in column 1
     
     Table &tbl = archetypes_[archetype_id]->tbl;
-    return (SingletonT *)tbl.columns[2];
+    return (SingletonT *)tbl.columns[1];
 }
 
 bool StateManager::archetypeNeedsSort(uint32_t archetype_id) const

@@ -15,71 +15,72 @@ namespace madrona {
 Context::Context(WorldBase *world_data, const WorkerInit &init)
     : data_(world_data),
       world_id_(init.worldID)
-{}
+{
+    state_mgr_ = &((StateManager *)mwGPU::GPUImplConsts::get().stateManagerAddr)[
+        world_id_.idx];
+}
 
 template <typename ArchetypeT>
 Entity Context::makeEntityNow()
 {
-    StateManager *state_mgr = mwGPU::getStateManager();
-    return state_mgr->makeEntityNow<ArchetypeT>(world_id_);
+    return state_mgr_->makeEntityNow<ArchetypeT>(world_id_);
 }
 
 template <typename ArchetypeT>
 Loc Context::makeTemporary()
 {
-    StateManager *state_mgr = mwGPU::getStateManager();
-    return state_mgr->makeTemporary<ArchetypeT>(world_id_);
+    return state_mgr_->makeTemporary<ArchetypeT>(world_id_);
 }
 
 void Context::destroyEntityNow(Entity e)
 {
-    return mwGPU::getStateManager()->destroyEntityNow(e);
+    return state_mgr_->destroyEntityNow(e);
 }
 
 Loc Context::getLoc(Entity e) const
 {
-    return mwGPU::getStateManager()->getLoc(e);
+    return state_mgr_->getLoc(e);
 }
 
 template <typename ComponentT>
 ComponentT & Context::getUnsafe(Entity e)
 {
-    return mwGPU::getStateManager()->getUnsafe<ComponentT>(e);
+    return state_mgr_->getUnsafe<ComponentT>(e);
 }
 
 template <typename ComponentT>
 ComponentT & Context::getUnsafe(Loc l)
 {
-    return mwGPU::getStateManager()->getUnsafe<ComponentT>(l);
+    return state_mgr_->getUnsafe<ComponentT>(l);
 }
 
 template <typename ComponentT>
 ResultRef<ComponentT> Context::get(Entity e)
 {
-    return mwGPU::getStateManager()->get<ComponentT>(e);
+    return state_mgr_->get<ComponentT>(e);
 }
 
 template <typename ComponentT>
 ResultRef<ComponentT> Context::get(Loc l)
 {
-    return mwGPU::getStateManager()->get<ComponentT>(l);
+    return state_mgr_->get<ComponentT>(l);
 }
 
 template <typename ComponentT>
 ComponentT & Context::getDirect(int32_t column_idx, Loc l)
 {
-    return mwGPU::getStateManager()->getDirect<ComponentT>(column_idx, l);
+    return state_mgr_->getDirect<ComponentT>(column_idx, l);
 }
 
 template <typename SingletonT>
 SingletonT & Context::getSingleton()
 {
-    return mwGPU::getStateManager()->getSingleton<SingletonT>(world_id_);
+    return state_mgr_->getSingleton<SingletonT>(world_id_);
 }
 
 inline void * Context::tmpAlloc(uint64_t num_bytes)
 {
-    return mwGPU::TmpAllocator::get().alloc(num_bytes);
+    return state_mgr_->tmpAlloc(num_bytes);
 }
 
 #if 0

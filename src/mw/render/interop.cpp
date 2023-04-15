@@ -92,7 +92,7 @@ inline void updateViewData(Context &ctx,
 #endif
 }
 
-#ifdef MADRONA_GPU_MODE
+#if defined(MADRONA_GPU_HACK_MODE)
 
 inline void readbackCount(Context &ctx,
                           RendererState &renderer_state)
@@ -127,7 +127,7 @@ TaskGraph::NodeID RenderingSystem::setupTasks(TaskGraph::Builder &builder,
         Rotation,
         ViewSettings>>({instance_setup});
 
-#ifdef MADRONA_GPU_MODE
+#if defined(MADRONA_GPU_HACK_MODE)
     auto readback_count = builder.addToGraph<ParallelForNode<Context,
         readbackCount,
         RendererState>>({viewdata_update});
@@ -192,7 +192,7 @@ void RendererState::init(Context &ctx, const RendererInit &renderer_init)
         renderer_init.iface.blases,
         renderer_init.iface.packedViews[world_idx],
         renderer_init.worldOffset,
-#ifdef MADRONA_GPU_MODE
+#if defined(MADRONA_GPU_HACK_MODE)
         renderer_init.iface.numInstancesReadback,
 #endif
 #elif defined (MADRONA_BATCHRENDER_METAL)

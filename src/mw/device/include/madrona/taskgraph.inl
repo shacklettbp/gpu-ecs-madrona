@@ -4,11 +4,6 @@ namespace madrona {
 
 namespace mwGPU {
 
-TaskGraph * getTaskGraph()
-{
-    return (TaskGraph *)mwGPU::GPUImplConsts::get().taskGraph;
-}
-
 template <typename NodeT, auto fn>
 __attribute__((used, always_inline))
 inline void userEntry(NodeBase *data_ptr, int32_t invocation_idx)
@@ -154,10 +149,13 @@ template <typename ContextT, auto Fn,
           typename ...ComponentTs>
 CustomParallelForNode<ContextT, Fn, threads_per_invocation,
                       items_per_invocation, ComponentTs...>::
-CustomParallelForNode()
+CustomParallelForNode(int32_t world_idx)
     : NodeBase {},
-      query_ref_([]() {
-          auto query = mwGPU::getStateManager()->query<ComponentTs...>();
+      query_ref_([world_idx]() {
+          StateManager *state_mgr = 
+              &((StateManager *)mwGPU::GPUImplConsts::get().stateManagerAddr)[world_idx];
+          auto query = state_mgr->query<ComponentTs...>();
+
           QueryRef *query_ref = query.getSharedRef();
           query_ref->numReferences.fetch_add_relaxed(1);
 
@@ -174,97 +172,31 @@ void CustomParallelForNode<ContextT, Fn,
                            items_per_invocation,
                            ComponentTs...>::run(const int32_t invocation_idx)
 {
-    // Special case the vastly common case
-    if constexpr (items_per_invocation == 1) {
-        StateManager *state_mgr = mwGPU::getStateManager();
 
-        int32_t cumulative_num_rows = 0;
-        state_mgr->iterateArchetypesRaw<sizeof...(ComponentTs)>(query_ref_,
-                [&](int32_t num_rows, WorldID *world_column,
-                    auto ...raw_ptrs) {
-            int32_t tbl_offset = invocation_idx - cumulative_num_rows;
-            cumulative_num_rows += num_rows;
-            if (tbl_offset >= num_rows) {
-                return false;
-            }
+    int32_t world_idx = invocation_idx;
+    StateManager *state_mgr = 
+        &((StateManager *)mwGPU::GPUImplConsts::get().stateManagerAddr)[world_idx];
+    ContextT ctx = TaskGraph::makeContext<ContextT>(WorldID {world_idx});
 
-            WorldID world_id = world_column[tbl_offset];
-
-            // This entity has been deleted but not actually removed from the
-            // table yet
-            if (world_id.idx == -1) {
-                return true;
-            }
-
-            ContextT ctx = TaskGraph::makeContext<ContextT>(world_id);
-
+    state_mgr->iterateArchetypesRaw<sizeof...(ComponentTs)>(query_ref_,
+        [&](int32_t num_rows, auto ...raw_ptrs) {
             // The following should work, but doesn't in cuda 11.7 it seems
             // Need to put arguments in tuple for some reason instead
             //Fn(ctx, ((ComponentTs *)raw_ptrs)[tbl_offset] ...);
-
+            
             cuda::std::tuple typed_ptrs {
                 (ComponentTs *)raw_ptrs
                 ...
             };
-
+            
             std::apply([&](auto ...ptrs) {
-                Fn(ctx, ptrs[tbl_offset] ...);
+                for (int32_t i = 0; i < num_rows; i++) {
+                    Fn(ctx, ptrs[i] ...);
+                }
             }, typed_ptrs);
 
-            return true;
+            return false;
         });
-    } else {
-        int32_t base_item_idx = invocation_idx * items_per_invocation;
-        int32_t cur_item_offset = 0;
-
-        StateManager *state_mgr = mwGPU::getStateManager();
-        int32_t cumulative_num_rows = 0;
-        state_mgr->iterateArchetypesRaw<sizeof...(ComponentTs)>(query_ref_,
-                [&](int32_t num_rows, WorldID *world_column,
-                    auto ...raw_ptrs) {
-            int32_t item_idx = base_item_idx + cur_item_offset;
-            int32_t tbl_offset = item_idx - cumulative_num_rows;
-            cumulative_num_rows += num_rows;
-
-            int32_t launch_size = min(num_rows - tbl_offset,
-                                      items_per_invocation);
-            if (launch_size <= 0) {
-                return false;
-            }
-
-            // The following should work, but doesn't in cuda 11.7 it seems
-            // Need to put arguments in tuple for some reason instead
-            //Fn(ctx, ((ComponentTs *)raw_ptrs)[tbl_offset] ...);
-
-            cuda::std::tuple typed_ptrs {
-                (ComponentTs *)raw_ptrs
-                ...
-            };
-
-            std::apply([&](auto ...ptrs) {
-                Fn(world_column + tbl_offset,
-                   ptrs + tbl_offset ...,
-                   launch_size);
-            }, typed_ptrs);
-
-            cur_item_offset += launch_size;
-            return cur_item_offset == items_per_invocation;
-        });
-    }
-}
-
-template <typename ContextT, auto Fn,
-          int32_t threads_per_invocation,
-          int32_t items_per_invocation,
-          typename ...ComponentTs>
-uint32_t CustomParallelForNode<ContextT, Fn,
-                               threads_per_invocation,
-                               items_per_invocation,
-                               ComponentTs...>::numInvocations()
-{
-    StateManager *state_mgr = mwGPU::getStateManager();
-    int32_t num_entities = state_mgr->numMatchingEntities(query_ref_);
-    return utils::divideRoundUp(num_entities, items_per_invocation);
 }
 
 template <typename ContextT, auto Fn,
@@ -278,12 +210,13 @@ TaskGraph::NodeID CustomParallelForNode<ContextT, Fn,
     TaskGraph::Builder &builder,
     Span<const TaskGraph::NodeID> dependencies)
 {
-    return builder.addDynamicCountNode<
+    return builder.addOneOffNode<
         CustomParallelForNode<
             ContextT, Fn,
             threads_per_invocation,
             items_per_invocation,
-            ComponentTs...>>(dependencies, threads_per_invocation);
+            ComponentTs...>>(dependencies,
+                             builder.worldIDX());
 }
 
 template <typename ArchetypeT>
@@ -293,25 +226,6 @@ TaskGraph::NodeID ClearTmpNode<ArchetypeT>::addToGraph(
 {
     return ClearTmpNodeBase::addToGraph(builder, dependencies,
         TypeTracker::typeID<ArchetypeT>());
-}
-
-template <typename ArchetypeT>
-TaskGraph::NodeID CompactArchetypeNode<ArchetypeT>::addToGraph(
-    TaskGraph::Builder &builder,
-    Span<const TaskGraph::NodeID> dependencies)
-{
-    return CompactArchetypeNodeBase::addToGraph(builder, dependencies,
-        TypeTracker::typeID<ArchetypeT>());
-}
-
-template <typename ArchetypeT, typename ComponentT>
-TaskGraph::NodeID SortArchetypeNode<ArchetypeT, ComponentT>::addToGraph(
-    TaskGraph::Builder &builder,
-    Span<const TaskGraph::NodeID> dependencies)
-{
-    return SortArchetypeNodeBase::addToGraph(builder, dependencies,
-        TypeTracker::typeID<ArchetypeT>(),
-        TypeTracker::typeID<ComponentT>());
 }
 
 }

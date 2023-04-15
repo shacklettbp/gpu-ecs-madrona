@@ -52,7 +52,7 @@ struct Vector2 {
 
     inline float invLength() const
     {
-#ifdef MADRONA_GPU_MODE
+#ifdef MADRONA_GPU_HACK_MODE
         return rsqrtf(length2());
 #else
         return 1.f / length();
@@ -238,7 +238,7 @@ struct Vector3 {
 
     inline float invLength() const
     {
-#ifdef MADRONA_GPU_MODE
+#ifdef MADRONA_GPU_HACK_MODE
         return rsqrtf(length2());
 #else
         // FIXME: is there a CPU fast path here?
@@ -507,7 +507,7 @@ struct Quat {
 
     inline float invLength() const
     {
-#ifdef MADRONA_GPU_MODE
+#ifdef MADRONA_GPU_HACK_MODE
         return rsqrtf(length2());
 #else
         return 1.f / sqrtf(length2());

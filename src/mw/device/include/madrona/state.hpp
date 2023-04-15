@@ -25,13 +25,6 @@ namespace madrona {
 
 class StateManager;
 
-namespace mwGPU {
-static inline StateManager *getStateManager()
-{
-    return (StateManager *)GPUImplConsts::get().stateManagerAddr;
-}
-}
-
 struct ComponentID {
     uint32_t id;
 
@@ -81,17 +74,11 @@ struct EntityStore {
         uint32_t gen;
     };
 
-    AtomicI32 availableOffset = 0;
-    AtomicI32 deletedOffset = 0;
+    static inline constexpr int32_t maxNumEntities = 32 * 8;
 
-    EntitySlot *entities;
-    int32_t *availableEntities;
-    int32_t *deletedEntities;
-
-    int32_t numMappedEntities;
-    uint32_t numGrowEntities;
-    uint32_t numSlotGrowBytes;
-    uint32_t numIdxGrowBytes;
+    EntitySlot entities[maxNumEntities];
+    uint32_t freeEntities[maxNumEntities / 32];
+    uint32_t numFreeEntities;
 
     SpinLock growLock {};
 };
@@ -166,7 +153,6 @@ public:
                                                   int32_t column_idx);
 
     inline int32_t getArchetypeNumColumns(uint32_t archetype_id);
-    inline uint32_t getArchetypeMaxColumnSize(uint32_t archetype_id);
 
     inline void remapEntity(Entity e, int32_t row_idx);
 
@@ -176,13 +162,44 @@ public:
     void resizeArchetype(uint32_t archetype_id, int32_t num_rows);
     int32_t numArchetypeRows(uint32_t archetype_id) const;
 
-    std::pair<int32_t, int32_t> fetchRecyclableEntities();
-
-    void recycleEntities(int32_t thread_offset,
-                         int32_t recycle_base);
-
     inline bool archetypeNeedsSort(uint32_t archetype_id) const;
     inline void archetypeClearNeedsSort(uint32_t archetype_id);
+
+    inline void * tmpAlloc(uint64_t num_bytes)
+    {
+        num_bytes = utils::roundUp(num_bytes, (uint64_t)8);
+        uint64_t offset = num_bytes;
+        num_bytes += 16;
+
+        char *buffer = (char *)rawAlloc(num_bytes);
+
+        void **next = (void **)(buffer + offset);
+        *next = tmp_alloc_head_;
+        ((uint64_t *)next)[1] = offset;
+
+        tmp_alloc_head_ = buffer + offset;
+
+        return buffer;
+    }
+
+    inline void resetTmp()
+    {
+        void *cur = tmp_alloc_head_;
+
+        while (cur != nullptr) {
+            void **metadata = (void **)cur;
+            void *next =  *((void **)(metadata));
+
+            uint64_t offset = ((uint64_t *)(metadata))[1];
+
+            void *start = (char *)cur - offset;
+            rawDealloc(start);
+
+            cur = next;
+        }
+
+        tmp_alloc_head_ = nullptr;
+    }
 
 private:
     template <typename SingletonT>
@@ -194,10 +211,10 @@ private:
     static inline uint32_t num_components_ = 0;
     static inline uint32_t num_archetypes_ = 0;
 
-    static constexpr uint32_t max_components_ = 512;
-    static constexpr uint32_t max_archetypes_ = 128;
-    static constexpr uint32_t user_component_offset_ = 2;
-    static constexpr uint32_t max_query_slots_ = 65536;
+    static constexpr uint32_t max_components_ = 32;
+    static constexpr uint32_t max_archetypes_ = 16;
+    static constexpr uint32_t user_component_offset_ = 1;
+    static constexpr uint32_t max_query_slots_ = 512;
     static inline constexpr int32_t num_elems_per_sort_thread_ = 2;
 
 
@@ -232,13 +249,16 @@ private:
 
     uint32_t archetype_component_offset_ = 0;
     uint32_t query_data_offset_ = 0;
-    SpinLock query_data_lock_ {};
     FixedInlineArray<Optional<TypeInfo>, max_components_> components_ {};
     std::array<uint32_t, max_archetype_components_ * max_archetypes_>
         archetype_components_ {};
     FixedInlineArray<Optional<ArchetypeStore>, max_archetypes_> archetypes_ {};
+    std::array<QueryRef, 64> query_refs_;
     std::array<uint32_t, max_query_slots_> query_data_ {};
+    uint32_t num_queries_;
     EntityStore entity_store_;
+
+    void *tmp_alloc_head_;
 };
 
 }

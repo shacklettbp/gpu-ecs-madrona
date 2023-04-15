@@ -35,7 +35,7 @@ struct GPUImplConsts {
 }
 }
 
-#ifdef MADRONA_GPU_MODE
+#ifdef MADRONA_GPU_HACK_MODE
 extern "C" {
 extern __constant__ madrona::mwGPU::GPUImplConsts
     madronaMWGPUConsts;

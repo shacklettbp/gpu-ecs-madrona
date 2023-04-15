@@ -229,7 +229,7 @@ private:
     template <typename... Args>
     constexpr void construct(Args && ...args)
     {
-#ifdef MADRONA_GPU_MODE
+#ifdef MADRONA_GPU_HACK_MODE
         new (&value_) T(std::forward<Args>(args)...);
 #else
         std::construct_at(&value_, std::forward<Args>(args)...);

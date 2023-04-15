@@ -11,7 +11,7 @@
 #define MADRONA_X64 (1)
 #elif defined (__arm64__)
 #define MADRONA_ARM (1)
-#elif !defined (MADRONA_GPU_MODE)
+#elif !defined (MADRONA_GPU_MODE) && !defined (MADRONA_GPU_HACK_MODE)
 #error "Unsupported architecture"
 #endif
 
@@ -21,7 +21,7 @@
 #define MADRONA_CLANG (1)
 #elif defined(__GNUC__)
 #define MADRONA_GCC (1)
-#elif !defined(MADRONA_GPU_MODE)
+#elif !defined(MADRONA_GPU_MODE) && !defined (MADRONA_GPU_HACK_MODE)
 #error "Unsupported compiler"
 #endif
 
@@ -67,7 +67,7 @@
 #if defined(MADRONA_MSVC)
 #define MADRONA_ALWAYS_INLINE [[msvc::forceinline]]
 #define MADRONA_NO_INLINE __declspec(noinline)
-#elif defined(MADRONA_CLANG) || defined(MADRONA_GCC) || defined(MADRONA_GPU_MODE)
+#elif defined(MADRONA_CLANG) || defined(MADRONA_GCC) || defined(MADRONA_GPU_MODE) || defined(MADRONA_GPU_HACK_MODE)
 #define MADRONA_ALWAYS_INLINE __attribute__((always_inline))
 #define MADRONA_NO_INLINE __attribute__((noinline))
 #endif

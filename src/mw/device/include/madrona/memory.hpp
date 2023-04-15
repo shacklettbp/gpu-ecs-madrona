@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef MADRONA_GPU_MODE
+#ifdef MADRONA_GPU_HACK_MODE
 
 #include <cstdint>
 #include <cuda/atomic>
@@ -80,7 +80,7 @@ struct HostAllocInit {
 }
 }
 
-#ifdef MADRONA_GPU_MODE
+#ifdef MADRONA_GPU_HACK_MODE
 
 namespace madrona {
 namespace mwGPU {
