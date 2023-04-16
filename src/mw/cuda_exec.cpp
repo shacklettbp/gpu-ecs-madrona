@@ -232,6 +232,7 @@ struct GPUKernels {
     CUfunction queueUserRun;
     CUfunction exportBarrierSetup;
     CUfunction exportCopyOut;
+    CUfunction exportCopyIn;
 };
 
 struct MegakernelCache {
@@ -1001,6 +1002,8 @@ static GPUKernels buildKernels(const CompileConfig &cfg,
                                    "madronaMWGPUExportBarrierSetup"));
         REQ_CU(cuModuleGetFunction(&gpu_kernels.exportCopyOut, gpu_kernels.mod,
                                    "madronaMWGPUExportCopyOut"));
+        REQ_CU(cuModuleGetFunction(&gpu_kernels.exportCopyIn, gpu_kernels.mod,
+                                   "madronaMWGPUExportCopyIn"));
     }
 
     return gpu_kernels;
@@ -1506,6 +1509,7 @@ static CUgraphExec makeTaskGraphRunGraph(
     const MegakernelConfig *megakernel_cfgs,
     const CUfunction *megakernels,
     int64_t num_megakernels,
+    CUfunction export_copy_in,
     CUfunction export_copy_out,
     uint32_t num_worlds,
     uint32_t num_exports,
@@ -1542,6 +1546,30 @@ static CUgraphExec makeTaskGraphRunGraph(
             default_cfg.numThreads, default_cfg.numBlocksPerSM,
             default_cfg.numSMs);
     }
+
+    uint32_t num_blocks_per_export = utils::divideRoundUp(
+        (uint32_t)num_worlds, (uint32_t)8);
+
+    auto export_copy_in_args = makeKernelArgBuffer(
+        (uint32_t)num_exports);
+
+    CUDA_KERNEL_NODE_PARAMS copy_in_node_params {
+        .func = export_copy_in,
+        .gridDimX = num_blocks_per_export,
+        .gridDimY = num_exports,
+        .gridDimZ = 1,
+        .blockDimX = 256,
+        .blockDimY = 1,
+        .blockDimZ = 1,
+        .sharedMemBytes = 0,
+        .kernelParams = nullptr,
+        .extra = export_copy_in_args.data(),
+    };
+
+    CUgraphNode export_copy_in_node;
+    REQ_CU(cuGraphAddKernelNode(&export_copy_in_node, run_graph,
+        nullptr, 0, &copy_in_node_params));
+
 
     DynArray<CUgraphNode> megakernel_launches(0);
 
@@ -1587,10 +1615,11 @@ static CUgraphExec makeTaskGraphRunGraph(
             -1 : switch_node_idx;
 
         CUgraphNode *deps = nullptr;
-        unsigned int num_deps = 0;
+        unsigned int num_deps = 1;
         if (megakernel_launches.size() > 0) {
             deps = &megakernel_launches.back();
-            num_deps = 1;
+        } else {
+            deps = &export_copy_in_node;
         }
 
         auto megakernel_args = makeKernelArgBuffer((int32_t)cur_node_idx,
@@ -1602,14 +1631,11 @@ static CUgraphExec makeTaskGraphRunGraph(
         cur_node_idx = switch_node_idx;
     }
 
-    uint32_t num_blocks_per_export = utils::divideRoundUp(
-        (uint32_t)num_worlds, (uint32_t)8);
-
     auto export_copy_out_args = makeKernelArgBuffer(
         (uint32_t)num_exports,
         prefix_sum_buffer, barrier_buffer);
 
-    CUDA_KERNEL_NODE_PARAMS kernel_node_params {
+    CUDA_KERNEL_NODE_PARAMS copy_out_node_params {
         .func = export_copy_out,
         .gridDimX = num_blocks_per_export,
         .gridDimY = num_exports,
@@ -1624,7 +1650,7 @@ static CUgraphExec makeTaskGraphRunGraph(
 
     CUgraphNode export_copy_out_node;
     REQ_CU(cuGraphAddKernelNode(&export_copy_out_node, run_graph,
-        &megakernel_launches.back(), 1, &kernel_node_params));
+        &megakernel_launches.back(), 1, &copy_out_node_params));
 
     CUgraphExec run_graph_exec;
     REQ_CU(cuGraphInstantiate(&run_graph_exec, run_graph, 0));
@@ -1689,6 +1715,7 @@ MADRONA_EXPORT MWCudaExecutor::MWCudaExecutor(
             makeTaskGraphRunGraph(megakernel_cfgs.data(),
                                   gpu_kernels.megakernels.data(),
                                   gpu_kernels.megakernels.size(),
+                                  gpu_kernels.exportCopyIn,
                                   gpu_kernels.exportCopyOut,
                                   state_cfg.numWorlds,
                                   state_cfg.numExportedBuffers,

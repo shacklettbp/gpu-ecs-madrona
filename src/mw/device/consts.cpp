@@ -89,6 +89,51 @@ extern "C" __global__ void madronaMWGPUExportBarrierSetup(
         blocks_per_export * num_exports);
 }
 
+extern "C" __global__ void madronaMWGPUExportCopyIn(
+    uint32_t num_exports)
+{
+    using namespace madrona;
+    using namespace madrona::mwGPU;
+
+    const int32_t num_worlds = GPUImplConsts::get().numWorlds;
+
+    constexpr int32_t threads_per_world = 32;
+    const int32_t lane_idx = threadIdx.x % 32;
+
+    int32_t world_idx =
+        (blockIdx.x * blockDim.x + threadIdx.x) / threads_per_world;
+
+    int32_t export_idx = blockIdx.y;
+
+    if (world_idx >= num_worlds || export_idx >= num_exports) {
+        return;
+    }
+
+    StateManager *state_mgr = 
+        &((StateManager *)mwGPU::GPUImplConsts::get().stateManagerAddr)[world_idx];
+
+    int32_t export_offset = state_mgr->exportedData[export_idx].offset;
+    int32_t num_rows_export = state_mgr->getExportNumRows(export_idx);
+
+    char *dst_export_ptr = (char *)state_mgr->getExportColumnPtr(export_idx);
+    uint32_t export_column_size = state_mgr->getExportColumnSize(export_idx);
+
+    char *src_export_ptr =
+        (char *)GPUImplConsts::get().exportPointers[export_idx];
+
+    for (int32_t i = 0; i < num_rows_export; i += 32) {
+        int32_t idx = i + lane_idx;
+
+        if (idx >= num_rows_export) {
+            continue;
+        }
+
+        memcpy(dst_export_ptr + export_column_size * idx,
+               src_export_ptr + export_column_size * (export_offset + idx), 
+               export_column_size);
+    }
+}
+
 extern "C" __global__ void madronaMWGPUExportCopyOut(
     uint32_t num_exports,
     uint32_t *prefix_sums,
@@ -141,7 +186,7 @@ extern "C" __global__ void madronaMWGPUExportCopyOut(
             local_sum += cur;
         }
 
-        prefix_smem[prefix_slot] = local_sum;
+        prefix_sums[prefix_slot] = local_sum;
 
         barrier->arrive_and_wait();
 
@@ -178,7 +223,7 @@ extern "C" __global__ void madronaMWGPUExportCopyOut(
             continue;
         }
 
-        memcpy(dst_export_ptr + export_column_size * idx, 
+        memcpy(dst_export_ptr + export_column_size * (export_offset + idx),
                src_export_ptr + export_column_size * idx, 
                export_column_size);
     }
