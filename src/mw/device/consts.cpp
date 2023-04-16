@@ -73,12 +73,113 @@ extern "C" __global__ void madronaMWGPUComputeConstants(
     *job_system_buffer_size = total_bytes;
 }
 
-extern "C" __global__ void madronaMWGPUSetupExports(
+extern "C" __global__ void madronaMWGPUExportBarrierSetup(
     uint32_t num_exports,
     cuda::barrier<cuda::thread_scope_device> *barrier)
 {
-    //using namespace madrona;
-    //using namespace madrona::mwGPU;
+    using namespace madrona;
+    using namespace madrona::mwGPU;
 
-    //uint32_t num_worlds = GPUImplConsts::get().numWorlds;
+    assert(sizeof(cuda::barrier<cuda::thread_scope_device>) <= 64);
+
+    const int32_t num_worlds = GPUImplConsts::get().numWorlds;
+    int32_t blocks_per_export = utils::divideRoundUp(num_worlds, 8);
+
+    new (barrier) cuda::barrier<cuda::thread_scope_device>(
+        blocks_per_export * num_exports);
+}
+
+extern "C" __global__ void madronaMWGPUExportCopyOut(
+    uint32_t num_exports,
+    uint32_t *prefix_sums,
+    cuda::barrier<cuda::thread_scope_device> *barrier)
+{
+    __shared__ uint32_t prefix_smem[8];
+
+    using namespace madrona;
+    using namespace madrona::mwGPU;
+
+    const int32_t num_worlds = GPUImplConsts::get().numWorlds;
+
+    constexpr int32_t threads_per_world = 32;
+    const int32_t warp_idx = threadIdx.x / 32;
+    const int32_t lane_idx = threadIdx.x % 32;
+
+    int32_t world_idx =
+        (blockIdx.x * blockDim.x + threadIdx.x) / threads_per_world;
+
+    int32_t export_idx = blockIdx.y;
+
+    if (world_idx >= num_worlds || export_idx >= num_exports) {
+        if (lane_idx == 0) {
+            prefix_smem[warp_idx] = 0;
+        }
+
+        return;
+    }
+
+    StateManager *state_mgr = 
+        &((StateManager *)mwGPU::GPUImplConsts::get().stateManagerAddr)[world_idx];
+
+    int32_t num_rows_export = state_mgr->getExportNumRows(export_idx);
+
+    if (lane_idx == 0) {
+        prefix_smem[warp_idx] = num_rows_export;
+    }
+
+    __syncthreads();
+
+    int32_t blocks_per_export = utils::divideRoundUp(num_worlds, 8);
+
+    int32_t prefix_slot = blockIdx.x + export_idx * blocks_per_export;
+
+    if (warp_idx == 0 && lane_idx == 0) {
+        int32_t local_sum = 0;
+        for (int32_t i = 0; i < 8; i++) {
+            int32_t cur = prefix_smem[i];
+            prefix_smem[i] = local_sum;
+            local_sum += cur;
+        }
+
+        prefix_smem[prefix_slot] = local_sum;
+
+        barrier->arrive_and_wait();
+
+        uint32_t prev_block_sum = 0;
+        int32_t sum_start = export_idx * blocks_per_export;
+
+        for (int32_t i = sum_start; i < prefix_slot; i++) {
+            prev_block_sum += prefix_sums[i];
+        }
+
+        for (int32_t i = 0; i < 8; i++) {
+            prefix_smem[i] += prev_block_sum;
+        }
+    }
+
+    __syncthreads();
+
+    int32_t export_offset = prefix_smem[warp_idx];
+
+    if (lane_idx == 0) {
+        state_mgr->exportedData[export_idx].offset = export_offset;
+    }
+
+    char *src_export_ptr = (char *)state_mgr->getExportColumnPtr(export_idx);
+    uint32_t export_column_size = state_mgr->getExportColumnSize(export_idx);
+
+    char *dst_export_ptr =
+        (char *)GPUImplConsts::get().exportPointers[export_idx];
+
+    for (int32_t i = 0; i < num_rows_export; i += 32) {
+        int32_t idx = i + lane_idx;
+
+        if (idx >= num_rows_export) {
+            continue;
+        }
+
+        memcpy(dst_export_ptr + export_column_size * idx, 
+               src_export_ptr + export_column_size * idx, 
+               export_column_size);
+    }
 }

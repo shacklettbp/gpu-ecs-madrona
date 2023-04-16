@@ -206,6 +206,7 @@ public:
     struct ExportData {
         uint32_t archetypeID;
         uint32_t columnIDX;
+        uint32_t offset;
     };
 
     std::array<ExportData, 64> exportedData;
@@ -248,6 +249,23 @@ public:
         }
     }
 
+    inline uint32_t getExportNumRows(uint32_t slot)
+    {
+        auto &archetype = *archetypes_[exportedData[slot].archetypeID];
+        return archetype.tbl.numRows;
+    }
+
+    inline void * getExportColumnPtr(uint32_t slot)
+    {
+        auto &archetype = *archetypes_[exportedData[slot].archetypeID];
+        return archetype.tbl.columns[exportedData[slot].columnIDX];
+    }
+
+    inline uint32_t getExportColumnSize(uint32_t slot)
+    {
+        auto &archetype = *archetypes_[exportedData[slot].archetypeID];
+        return archetype.tbl.columnSizes[exportedData[slot].columnIDX];
+    }
 
 private:
     template <typename SingletonT>

@@ -165,7 +165,6 @@ CustomParallelForNode(int32_t world_idx)
       }())
 {}
 
-
 template <typename ContextT, auto Fn,
           int32_t threads_per_invocation,
           int32_t items_per_invocation,
