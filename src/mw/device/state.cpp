@@ -43,12 +43,13 @@ static MADRONA_NO_INLINE void growTable(Table &tbl, int32_t row)
     tbl.numAllocatedRows = new_num_rows;
 }
 
-ECSRegistry::ECSRegistry(StateManager &state_mgr, void **export_ptr)
+ECSRegistry::ECSRegistry(StateManager &state_mgr,
+                         uint32_t *export_column_sizes)
     : state_mgr_(&state_mgr),
-      export_ptr_(export_ptr)
+      export_column_sizes_(export_column_sizes)
 {}
 
-StateManager::StateManager(uint32_t)
+StateManager::StateManager(uint32_t, uint32_t num_exported)
 {
     using namespace mwGPU;
 
@@ -81,6 +82,8 @@ StateManager::StateManager(uint32_t)
 
     num_queries_ = 0;
     tmp_alloc_head_ = nullptr;
+
+    numExported = num_exported;
 }
 
 void StateManager::registerComponent(uint32_t id, uint32_t alignment,

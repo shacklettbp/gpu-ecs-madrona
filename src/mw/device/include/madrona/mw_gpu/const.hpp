@@ -21,6 +21,8 @@ struct GPUImplConsts {
     void *hostPrintAddr;
     void *tmpAllocatorAddr;
     void *deviceTracingAddr;
+    void **exportPointers;
+    uint32_t *exportCounts;
     uint32_t numWorldDataBytes;
     uint32_t numWorlds;
     uint32_t jobGridsOffset;

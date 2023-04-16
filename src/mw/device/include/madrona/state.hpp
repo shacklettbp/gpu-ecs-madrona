@@ -43,7 +43,8 @@ friend class StateManager;
 
 class ECSRegistry {
 public:
-    ECSRegistry(StateManager &state_mgr, void **export_ptr);
+    ECSRegistry(StateManager &state_mgr,
+                uint32_t *export_column_sizes);
 
     template <typename ComponentT>
     void registerComponent();
@@ -65,7 +66,7 @@ public:
 
 private:
     StateManager *state_mgr_;
-    void **export_ptr_;
+    uint32_t *export_column_sizes_;
 };
 
 struct EntityStore {
@@ -85,7 +86,8 @@ struct EntityStore {
 
 class StateManager {
 public:
-    StateManager(uint32_t max_components);
+    StateManager(uint32_t max_components,
+                 uint32_t num_exported);
 
     template <typename ComponentT>
     ComponentID registerComponent();
@@ -200,6 +202,52 @@ public:
 
         tmp_alloc_head_ = nullptr;
     }
+
+    struct ExportData {
+        uint32_t archetypeID;
+        uint32_t columnIDX;
+    };
+
+    std::array<ExportData, 64> exportedData;
+    uint32_t numExported;
+
+    template <typename ArchetypeT, typename ComponentT>
+    inline void exportColumn(int32_t slot, uint32_t *export_column_sizes) {
+
+        uint32_t archetype_id = TypeTracker::typeID<ArchetypeT>();
+        uint32_t component_id = TypeTracker::typeID<ComponentT>();
+
+        auto &archetype = *archetypes_[archetype_id];
+        int32_t col_idx = *archetype.columnLookup.lookup(component_id);
+
+        exportedData[slot] = {
+            archetype_id,
+            (uint32_t)col_idx,
+        };
+
+        if (export_column_sizes != nullptr) {
+            export_column_sizes[slot] = (components_[component_id])->numBytes;
+        }
+    }
+
+    template <typename SingletonT>
+    inline void exportSingleton(int32_t slot, uint32_t *export_column_sizes) {
+        using ArchetypeT = SingletonArchetype<SingletonT>;
+
+        uint32_t archetype_id = TypeTracker::typeID<ArchetypeT>();
+        uint32_t component_id = TypeTracker::typeID<SingletonT>();
+
+        exportedData[slot] = {
+            archetype_id,
+            1,
+        };
+
+        if (export_column_sizes != nullptr) {
+            export_column_sizes[slot] =
+                (components_[component_id])->numBytes;
+        }
+    }
+
 
 private:
     template <typename SingletonT>

@@ -11,8 +11,11 @@ namespace entryKernels {
 
 template <typename ContextT, typename WorldT, typename ConfigT, typename InitT>
 __launch_bounds__(madrona::consts::numMegakernelThreads, 1)
-__global__ void initECS(HostAllocInit alloc_init, void *print_channel,
-                        void **exported_columns, void *cfg)
+__global__ void initECS(HostAllocInit alloc_init,
+                        void *print_channel,
+                        uint32_t *export_column_sizes,
+                        uint64_t num_exports,
+                        void *cfg)
 {
     int world_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (world_idx >= mwGPU::GPUImplConsts::get().numWorlds) {
@@ -26,9 +29,10 @@ __global__ void initECS(HostAllocInit alloc_init, void *print_channel,
 
     StateManager *state_mgr =
         &((StateManager *)mwGPU::GPUImplConsts::get().stateManagerAddr)[world_idx];
-    new (state_mgr) StateManager(0);
+    new (state_mgr) StateManager(0, (uint32_t)num_exports);
 
-    ECSRegistry ecs_registry(*state_mgr, exported_columns);
+    ECSRegistry ecs_registry(*state_mgr,
+        world_idx == 0 ? export_column_sizes : nullptr);
     WorldT::registerTypes(ecs_registry, *(ConfigT *)cfg);
 }
 

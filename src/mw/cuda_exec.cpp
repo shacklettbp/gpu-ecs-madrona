@@ -252,7 +252,7 @@ __attribute__((constructor)) static void setCudaHeapSize()
 {
     // FIXME size limit for device side malloc:
     REQ_CUDA(cudaDeviceSetLimit(cudaLimitMallocHeapSize,
-                                8ul*1024ul*1024ul*1024ul));
+                                20ul*1024ul*1024ul*1024ul));
 }
 
 using HostChannel = mwGPU::madrona::mwGPU::HostChannel;
@@ -1295,8 +1295,8 @@ static GPUEngineState initEngineAndUserState(
     auto gpu_state_size_readback = (size_t *)cu::allocReadback(
         sizeof(size_t));
 
-    auto exported_readback = (void **)cu::allocReadback(
-        sizeof(void *) * num_exported);
+    auto exported_column_sizes_readback = (uint32_t *)cu::allocReadback(
+        sizeof(uint32_t) * num_exported);
 
     CUdeviceptr allocator_channel_devptr;
     REQ_CU(cuMemAllocManaged(&allocator_channel_devptr,
@@ -1335,6 +1335,7 @@ static GPUEngineState initEngineAndUserState(
     auto host_print = std::make_unique<HostPrintCPU>();
 
     auto compute_consts_args = makeKernelArgBuffer(num_worlds,
+                                                   num_exported,
                                                    num_world_data_bytes,
                                                    world_data_alignment,
                                                    gpu_consts_readback,
@@ -1342,7 +1343,8 @@ static GPUEngineState initEngineAndUserState(
 
     auto init_ecs_args = makeKernelArgBuffer(alloc_init,
                                              host_print->getChannelPtr(),
-                                             exported_readback,
+                                             exported_column_sizes_readback,
+                                             (uint64_t)num_exported,
                                              user_cfg_gpu_buffer);
 
     auto init_tasks_args = makeKernelArgBuffer(user_cfg_gpu_buffer);
@@ -1360,7 +1362,10 @@ static GPUEngineState initEngineAndUserState(
     REQ_CUDA(cudaStreamSynchronize(strm));
 
     auto gpu_state_buffer = cu::allocGPU(*gpu_state_size_readback);
+    REQ_CUDA(cudaMemset(gpu_state_buffer, 0, *gpu_state_size_readback));
+
     cu::deallocCPU(gpu_state_size_readback);
+
 
     // The initial values of these pointers are equal to their offsets from
     // the base pointer. Now that we have the base pointer, write the
@@ -1402,6 +1407,16 @@ static GPUEngineState initEngineAndUserState(
         gpu_consts_readback->deviceTracingAddr);
 #endif
 
+    void **export_dst_ptrs = (void **)(
+        (char *)gpu_consts_readback->exportPointers +
+        (uintptr_t)gpu_state_buffer);
+
+    gpu_consts_readback->exportPointers = export_dst_ptrs;
+
+    gpu_consts_readback->exportCounts = (uint32_t *)(
+        (char *)gpu_consts_readback->exportCounts +
+        (uintptr_t)gpu_state_buffer);
+
     CUdeviceptr job_sys_consts_addr;
     size_t job_sys_consts_size;
     REQ_CU(cuModuleGetGlobal(&job_sys_consts_addr, &job_sys_consts_size,
@@ -1440,6 +1455,19 @@ static GPUEngineState initEngineAndUserState(
 
     REQ_CUDA(cudaStreamSynchronize(strm));
 
+    auto export_ptrs =
+        (void **)cu::allocStaging(sizeof(void *) * num_exported);
+
+    const int32_t max_exported_entities = 200;
+    for (uint32_t i = 0; i < num_exported; i++) {
+        printf("%u: %lu\n", i,
+            max_exported_entities * exported_column_sizes_readback[i]);
+        export_ptrs[i] = cu::allocGPU(
+            max_exported_entities * exported_column_sizes_readback[i]);
+    }
+
+    REQ_CUDA(cudaMemcpy((void *)export_dst_ptrs, (void *)export_ptrs, sizeof(void *) * num_exported, cudaMemcpyHostToDevice));
+
     cu::deallocGPU(user_cfg_gpu_buffer);
     cu::deallocGPU(init_tmp_buffer);
 
@@ -1448,10 +1476,9 @@ static GPUEngineState initEngineAndUserState(
     }
 
     HeapArray<void *> exported_cols(num_exported);
-    memcpy(exported_cols.data(), exported_readback,
-           sizeof(void *) * (uint64_t)num_exported);
-
-    cu::deallocCPU(exported_readback);
+    for (uint32_t i = 0; i < num_exported; i++) {
+        exported_cols[i] = export_ptrs[i];
+    }
 
     return GPUEngineState {
         std::move(batch_renderer),
@@ -1732,7 +1759,7 @@ static CUgraphExec makeTaskGraphRunGraph(
 }
 
 MADRONA_EXPORT MWCudaExecutor::MWCudaExecutor(
-        const StateConfig &state_cfg, const CompileConfig &o_compile_cfg)
+        const StateConfig &state_cfg, const CompileConfig &compile_cfg)
     : impl_(nullptr)
 {
     REQ_CUDA(cudaSetDevice(state_cfg.gpuID));

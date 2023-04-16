@@ -48,14 +48,15 @@ ComponentID StateManager::registerComponent()
 template <typename ArchetypeT, typename ComponentT>
 void ECSRegistry::exportColumn(int32_t slot)
 {
-    export_ptr_[slot] =
-        state_mgr_->getArchetypeComponent<ArchetypeT, ComponentT>();
+    state_mgr_->exportColumn<ArchetypeT, ComponentT>(
+        slot, export_column_sizes_);
 }
 
 template <typename SingletonT>
 void ECSRegistry::exportSingleton(int32_t slot)
 {
-    export_ptr_[slot] = state_mgr_->getSingletonColumn<SingletonT>();
+    state_mgr_->exportSingleton<SingletonT>(
+        slot, export_column_sizes_);
 }
 
 template <template <typename...> typename T, typename ...ComponentTs>
@@ -238,6 +239,7 @@ ComponentT & StateManager::getUnsafe(Entity e)
 
 template <typename ComponentT>
 ComponentT & StateManager::getUnsafe(Loc loc)
+
 {
     auto &archetype = *archetypes_[loc.archetype];
     uint32_t component_id = TypeTracker::typeID<ComponentT>();
