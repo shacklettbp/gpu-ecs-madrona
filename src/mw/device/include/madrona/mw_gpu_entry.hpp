@@ -11,8 +11,7 @@ namespace entryKernels {
 
 template <typename ContextT, typename WorldT, typename ConfigT, typename InitT>
 __launch_bounds__(madrona::consts::numMegakernelThreads, 1)
-__global__ void initECS(HostAllocInit alloc_init,
-                        void *print_channel,
+__global__ void initECS(void *print_channel,
                         uint32_t *export_column_sizes,
                         uint64_t num_exports,
                         void *cfg)

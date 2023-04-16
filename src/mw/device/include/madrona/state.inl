@@ -160,6 +160,7 @@ void StateManager::iterateArchetypesRawImpl(QueryRef *query_ref, Fn &&fn,
 
         bool early_out = fn(tbl.numRows,
             tbl.columns[query_values[Indices]] ...);
+
         if (early_out) {
             return;
         }

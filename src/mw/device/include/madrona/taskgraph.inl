@@ -1,5 +1,7 @@
 #pragma once
 
+#include <madrona/mw_gpu/host_print.hpp>
+
 namespace madrona {
 
 namespace mwGPU {
@@ -163,6 +165,7 @@ CustomParallelForNode(int32_t world_idx)
       }())
 {}
 
+
 template <typename ContextT, auto Fn,
           int32_t threads_per_invocation,
           int32_t items_per_invocation,
@@ -172,7 +175,6 @@ void CustomParallelForNode<ContextT, Fn,
                            items_per_invocation,
                            ComponentTs...>::run(const int32_t invocation_idx)
 {
-
     int32_t world_idx = invocation_idx;
     StateManager *state_mgr = 
         &((StateManager *)mwGPU::GPUImplConsts::get().stateManagerAddr)[world_idx];

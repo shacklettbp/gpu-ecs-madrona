@@ -17,8 +17,8 @@ static MADRONA_NO_INLINE void growTable(Table &tbl, int32_t row)
     int32_t cur_num_rows = tbl.numAllocatedRows;
     int32_t new_num_rows = cur_num_rows * 2;
 
-    if (new_num_rows - cur_num_rows > 10000) {
-        new_num_rows = cur_num_rows + 10000; 
+    if (new_num_rows - cur_num_rows > 100) {
+        new_num_rows = cur_num_rows + 100; 
     }
 
     for (int32_t i = 0; i < tbl.numColumns; i++) {

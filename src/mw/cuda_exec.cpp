@@ -185,62 +185,6 @@ private:
     std::thread thread_;
 };
 
-#ifdef MADRONA_TRACING
-class DeviceTracingManager {
-public:
-    inline DeviceTracingManager(void *dev_ptr)
-        : device_tracing_((DeviceTracing *)dev_ptr), steps_(0)
-    {
-        readback_ = (DeviceTracing *)
-            ::madrona::cu::allocReadback(sizeof(DeviceTracing) * max_log_steps_);
-    }
-
-    // async memcpy on the critical path, low overhead but can still impact the overall running time
-    inline void transferLogToCPU()
-    {
-        if (steps_ < max_log_steps_) {
-            REQ_CUDA(cudaMemcpyAsync(readback_ + steps_, device_tracing_, sizeof(DeviceTracing),
-                                        cudaMemcpyDeviceToHost));
-            steps_ += 1;
-        }
-        // can also process data on the data paths to save memory
-        // device_logs_cpu_.insert(device_logs_cpu_.end(), readback_->device_logs_, readback_->device_logs_ + readback_->getIndex());
-    }
-
-    inline ~DeviceTracingManager()
-    {
-        size_t num_logs = 0;
-        for (size_t i = 0; i < steps_; i++) {
-            auto log_index = (readback_ + i)->getIndex();
-            num_logs += log_index > 0 ? log_index : 0;
-        }
-        device_logs_cpu_ = new DeviceTracing::DeviceLog[num_logs];
-        
-        num_logs = 0;
-        for (size_t i = 0; i < steps_; i++) {
-            auto log_index = (readback_ + i)->getIndex();
-            if (log_index <= 0) continue;
-            std::memcpy(device_logs_cpu_ + num_logs, (readback_ + i)->device_logs_, log_index * sizeof(DeviceTracing::DeviceLog));
-            num_logs += log_index;
-        }
-        ::madrona::WriteToFile<DeviceTracing::DeviceLog>(
-            device_logs_cpu_, num_logs,
-            "/tmp/", "_madrona_device_tracing");
-
-        ::madrona::cu::deallocCPU(readback_);
-        delete[] device_logs_cpu_;
-    }
-
-private:
-    DeviceTracing *device_tracing_;
-    DeviceTracing *readback_;
-    // at most first 100 steps will be recorded for saving memory
-    const static size_t max_log_steps_ = 100;
-    size_t steps_;
-    DeviceTracing::DeviceLog* device_logs_cpu_;
-};
-#endif
-
 }
 }
 
@@ -255,11 +199,8 @@ __attribute__((constructor)) static void setCudaHeapSize()
                                 20ul*1024ul*1024ul*1024ul));
 }
 
-using HostChannel = mwGPU::madrona::mwGPU::HostChannel;
-using HostAllocInit = mwGPU::madrona::mwGPU::HostAllocInit;
 using HostPrint = mwGPU::madrona::mwGPU::HostPrint;
 using HostPrintCPU = mwGPU::madrona::mwGPU::HostPrintCPU;
-using DeviceTracingManager = mwGPU::madrona::mwGPU::DeviceTracingManager;
 
 namespace consts {
 static constexpr uint32_t numEntryQueueThreads = 512;
@@ -304,12 +245,7 @@ struct GPUEngineState {
     Optional<render::BatchRenderer> batchRenderer;
     void *stateBuffer;
 
-    std::thread allocatorThread;
-    HostChannel *hostAllocatorChannel;
     std::unique_ptr<HostPrintCPU> hostPrint;
-#ifdef MADRONA_TRACING
-    std::unique_ptr<DeviceTracingManager> deviceTracing;
-#endif
 
     HeapArray<void *> exportedColumns;
 };
@@ -1137,89 +1073,6 @@ HeapArray<void *> makeKernelArgBuffer(Ts ...args)
     }
 }
 
-static void mapGPUMemory(CUdevice dev, CUdeviceptr base, uint64_t num_bytes)
-{
-    CUmemAllocationProp alloc_prop {};
-    alloc_prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-    alloc_prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    alloc_prop.location.id = dev;
-
-    CUmemGenericAllocationHandle mem;
-    REQ_CU(cuMemCreate(&mem, num_bytes,
-                       &alloc_prop, 0));
-
-    REQ_CU(cuMemMap(base, num_bytes, 0, mem, 0));
-    REQ_CU(cuMemRelease(mem));
-
-    CUmemAccessDesc access_ctrl;
-    access_ctrl.location = alloc_prop.location;
-    access_ctrl.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-    REQ_CU(cuMemSetAccess(base, num_bytes,
-                          &access_ctrl, 1));
-
-}
-
-static void gpuVMAllocatorThread(HostChannel *channel, CUdevice dev)
-{
-    using namespace std::chrono_literals;
-    using cuda::std::memory_order_acquire;
-    using cuda::std::memory_order_relaxed;
-    using cuda::std::memory_order_release;
-
-    char *verbose_host_alloc_env = getenv("MADRONA_MWGPU_VERBOSE_HOSTALLOC");
-    bool verbose_host_alloc =
-        verbose_host_alloc_env && verbose_host_alloc_env[0] == '1';
-
-    while (true) {
-        while (channel->ready.load(memory_order_acquire) != 1) {
-            std::this_thread::sleep_for(1ms);
-        }
-        channel->ready.store(0, memory_order_relaxed);
-
-        if (channel->op == HostChannel::Op::Reserve) {
-            uint64_t num_reserve_bytes = channel->reserve.maxBytes;
-            uint64_t num_alloc_bytes = channel->reserve.initNumBytes;
-
-            if (verbose_host_alloc) {
-                printf("Reserve request received %lu %lu\n",
-                       num_reserve_bytes, num_alloc_bytes);
-            }
-
-            CUdeviceptr dev_ptr;
-            REQ_CU(cuMemAddressReserve(&dev_ptr, num_reserve_bytes,
-                                       0, 0, 0));
-
-            if (num_alloc_bytes > 0) {
-                mapGPUMemory(dev, dev_ptr, num_alloc_bytes);
-            }
-
-            if (verbose_host_alloc) {
-                printf("Reserved %p\n", (void *)dev_ptr);
-            }
-
-            channel->reserve.result = (void *)dev_ptr;
-        } else if (channel->op == HostChannel::Op::Map) {
-            void *ptr = channel->map.addr;
-            uint64_t num_bytes = channel->map.numBytes;
-
-            if (verbose_host_alloc) {
-                printf("Grow request received %p %lu\n",
-                       ptr, num_bytes);
-            }
-
-            mapGPUMemory(dev, (CUdeviceptr)ptr, num_bytes);
-
-            if (verbose_host_alloc) {
-                printf("Grew %p\n", ptr);
-            }
-        } else if (channel->op == HostChannel::Op::Terminate) {
-            break;
-        }
-
-        channel->finished.store(1, memory_order_release);
-    }
-}
-
 static GPUEngineState initEngineAndUserState(
     int gpu_id,
     uint32_t num_worlds,
@@ -1298,40 +1151,6 @@ static GPUEngineState initEngineAndUserState(
     auto exported_column_sizes_readback = (uint32_t *)cu::allocReadback(
         sizeof(uint32_t) * num_exported);
 
-    CUdeviceptr allocator_channel_devptr;
-    REQ_CU(cuMemAllocManaged(&allocator_channel_devptr,
-                             sizeof(HostChannel), CU_MEM_ATTACH_GLOBAL));
-    REQ_CU(cuMemAdvise((CUdeviceptr)allocator_channel_devptr, sizeof(HostChannel),
-                       CU_MEM_ADVISE_SET_READ_MOSTLY, 0));
-    REQ_CU(cuMemAdvise((CUdeviceptr)allocator_channel_devptr, sizeof(HostChannel),
-                       CU_MEM_ADVISE_SET_ACCESSED_BY, CU_DEVICE_CPU));
-
-    CUdevice cu_gpu;
-    REQ_CU(cuCtxGetDevice(&cu_gpu));
-    REQ_CU(cuMemAdvise(allocator_channel_devptr, sizeof(HostChannel),
-                       CU_MEM_ADVISE_SET_ACCESSED_BY, cu_gpu));
-
-    HostChannel *allocator_channel = (HostChannel *)allocator_channel_devptr;
-
-    size_t cu_va_alloc_granularity;
-    {
-        CUmemAllocationProp default_prop {};
-        default_prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-        default_prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-        default_prop.location.id = cu_gpu;
-        REQ_CU(cuMemGetAllocationGranularity(&cu_va_alloc_granularity,
-            &default_prop, CU_MEM_ALLOC_GRANULARITY_RECOMMENDED));
-    }
-
-    HostAllocInit alloc_init {
-        (uint64_t)sysconf(_SC_PAGESIZE),
-        (uint64_t)cu_va_alloc_granularity,
-        allocator_channel,
-    };
-
-    std::thread allocator_thread(
-        gpuVMAllocatorThread, allocator_channel, cu_gpu);
-
     auto host_print = std::make_unique<HostPrintCPU>();
 
     auto compute_consts_args = makeKernelArgBuffer(num_worlds,
@@ -1341,8 +1160,7 @@ static GPUEngineState initEngineAndUserState(
                                                    gpu_consts_readback,
                                                    gpu_state_size_readback);
 
-    auto init_ecs_args = makeKernelArgBuffer(alloc_init,
-                                             host_print->getChannelPtr(),
+    auto init_ecs_args = makeKernelArgBuffer(host_print->getChannelPtr(),
                                              exported_column_sizes_readback,
                                              (uint64_t)num_exported,
                                              user_cfg_gpu_buffer);
@@ -1362,7 +1180,10 @@ static GPUEngineState initEngineAndUserState(
     REQ_CUDA(cudaStreamSynchronize(strm));
 
     auto gpu_state_buffer = cu::allocGPU(*gpu_state_size_readback);
+
     REQ_CUDA(cudaMemset(gpu_state_buffer, 0, *gpu_state_size_readback));
+
+    printf("Readback size: %lu\n", *gpu_state_size_readback);
 
     cu::deallocCPU(gpu_state_size_readback);
 
@@ -1398,14 +1219,8 @@ static GPUEngineState initEngineAndUserState(
         (char *)gpu_consts_readback->tmpAllocatorAddr +
         (uintptr_t)gpu_state_buffer;
 
-#ifdef MADRONA_TRACING
-    gpu_consts_readback->deviceTracingAddr =
-        (char *)gpu_consts_readback->deviceTracingAddr +
-        (uintptr_t)gpu_state_buffer;
-
-    auto device_tracing = std::make_unique<DeviceTracingManager>(
-        gpu_consts_readback->deviceTracingAddr);
-#endif
+    printf("Export pointers offset %lu\n",
+        (uintptr_t)gpu_consts_readback->exportPointers);
 
     void **export_dst_ptrs = (void **)(
         (char *)gpu_consts_readback->exportPointers +
@@ -1458,7 +1273,7 @@ static GPUEngineState initEngineAndUserState(
     auto export_ptrs =
         (void **)cu::allocStaging(sizeof(void *) * num_exported);
 
-    const int32_t max_exported_entities = 200;
+    const int32_t max_exported_entities = 200 * num_worlds;
     for (uint32_t i = 0; i < num_exported; i++) {
         printf("%u: %lu\n", i,
             max_exported_entities * exported_column_sizes_readback[i]);
@@ -1466,7 +1281,8 @@ static GPUEngineState initEngineAndUserState(
             max_exported_entities * exported_column_sizes_readback[i]);
     }
 
-    REQ_CUDA(cudaMemcpy((void *)export_dst_ptrs, (void *)export_ptrs, sizeof(void *) * num_exported, cudaMemcpyHostToDevice));
+    REQ_CUDA(cudaMemcpy((void *)export_dst_ptrs, (void *)export_ptrs,
+                        sizeof(void *) * num_exported, cudaMemcpyHostToDevice));
 
     cu::deallocGPU(user_cfg_gpu_buffer);
     cu::deallocGPU(init_tmp_buffer);
@@ -1483,12 +1299,7 @@ static GPUEngineState initEngineAndUserState(
     return GPUEngineState {
         std::move(batch_renderer),
         gpu_state_buffer,
-        std::move(allocator_thread),
-        allocator_channel,
         std::move(host_print),
-#ifdef MADRONA_TRACING
-        std::move(device_tracing),
-#endif
         std::move(exported_cols),
     };
 }
@@ -1830,17 +1641,6 @@ MADRONA_EXPORT MWCudaExecutor::MWCudaExecutor(MWCudaExecutor &&o)
 MADRONA_EXPORT MWCudaExecutor::~MWCudaExecutor()
 {
     if (!impl_) return;
-
-#ifdef MADRONA_TRACING
-    // Seems good to copy the logs before the module is unloaded
-    impl_->engineState.deviceTracing.reset();
-#endif
-
-    impl_->engineState.hostAllocatorChannel->op =
-        HostChannel::Op::Terminate;
-    impl_->engineState.hostAllocatorChannel->ready.store(
-        1, cuda::std::memory_order_release);
-    impl_->engineState.allocatorThread.join();
 
     REQ_CU(cuGraphExecDestroy(impl_->runGraph));
     REQ_CU(cuModuleUnload(impl_->cuModule));

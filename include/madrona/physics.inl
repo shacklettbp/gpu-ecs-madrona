@@ -67,6 +67,7 @@ void BVH::findOverlaps(const math::AABB &aabb, Fn &&fn) const
 
     while (stack_size > 0) {
         int32_t node_idx = stack[--stack_size];
+        assert(node_idx < num_nodes_);
         const Node &node = nodes_[node_idx];
         for (int i = 0; i < 4; i++) {
             if (!node.hasChild(i)) {

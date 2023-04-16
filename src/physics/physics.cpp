@@ -3,6 +3,10 @@
 
 #include "physics_impl.hpp"
 
+#ifdef MADRONA_GPU_HACK_MODE
+#include <madrona/mw_gpu/host_print.hpp>
+#endif
+
 namespace madrona::phys {
 
 using namespace base;

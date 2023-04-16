@@ -866,6 +866,7 @@ inline void updateLeafPositionsEntry(
 {
     BVH &bvh = ctx.getSingleton<BVH>();
     ObjectManager &obj_mgr = *ctx.getSingleton<ObjectData>().mgr;
+
     AABB obj_aabb = obj_mgr.aabbs[obj_id.idx];
 
     bvh.updateLeafPosition(leaf_id, pos, rot, scale, vel.linear, obj_aabb);
@@ -902,6 +903,7 @@ inline void findOverlappingEntry(
 
     // FIXME: should have a flag for passing this
     // directly into the system
+
     Loc a_loc = ctx.getLoc(e);
     bool a_is_static = 
         ctx.getDirect<ResponseType>(Cols::ResponseType, a_loc) ==

@@ -64,8 +64,8 @@ public:
     template <typename SingletonT>
     void exportSingleton(int32_t slot);
 
-private:
     StateManager *state_mgr_;
+private:
     uint32_t *export_column_sizes_;
 };
 
@@ -259,7 +259,7 @@ private:
     static inline uint32_t num_components_ = 0;
     static inline uint32_t num_archetypes_ = 0;
 
-    static constexpr uint32_t max_components_ = 32;
+    static constexpr uint32_t max_components_ = 64;
     static constexpr uint32_t max_archetypes_ = 16;
     static constexpr uint32_t user_component_offset_ = 1;
     static constexpr uint32_t max_query_slots_ = 512;
