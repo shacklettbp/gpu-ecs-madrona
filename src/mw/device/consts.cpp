@@ -134,10 +134,9 @@ extern "C" __global__ void madronaMWGPUExportCopyIn(
     }
 }
 
-extern "C" __global__ void madronaMWGPUExportCopyOut(
+extern "C" __global__ void madronaMWGPUExportBlockSums(
     uint32_t num_exports,
-    uint32_t *prefix_sums,
-    cuda::barrier<cuda::thread_scope_device> *barrier)
+    uint32_t *block_sums)
 {
     __shared__ uint32_t prefix_smem[8];
 
@@ -175,30 +174,74 @@ extern "C" __global__ void madronaMWGPUExportCopyOut(
     __syncthreads();
 
     int32_t blocks_per_export = utils::divideRoundUp(num_worlds, 8);
-
-    int32_t prefix_slot = blockIdx.x + export_idx * blocks_per_export;
+    int32_t block_slot = blockIdx.x + export_idx * blocks_per_export;
 
     if (warp_idx == 0 && lane_idx == 0) {
         int32_t local_sum = 0;
         for (int32_t i = 0; i < 8; i++) {
             int32_t cur = prefix_smem[i];
-            prefix_smem[i] = local_sum;
             local_sum += cur;
         }
 
-        prefix_sums[prefix_slot] = local_sum;
+        block_sums[block_slot] = local_sum;
+    }
+}
 
-        barrier->arrive_and_wait();
+extern "C" __global__ void madronaMWGPUExportCopyOut(
+    uint32_t num_exports,
+    uint32_t *block_sums)
+{
+    __shared__ uint32_t prefix_smem[8];
 
+    using namespace madrona;
+    using namespace madrona::mwGPU;
+
+    const int32_t num_worlds = GPUImplConsts::get().numWorlds;
+
+    constexpr int32_t threads_per_world = 32;
+    const int32_t warp_idx = threadIdx.x / 32;
+    const int32_t lane_idx = threadIdx.x % 32;
+
+    int32_t world_idx =
+        (blockIdx.x * blockDim.x + threadIdx.x) / threads_per_world;
+
+    int32_t export_idx = blockIdx.y;
+
+    if (world_idx >= num_worlds || export_idx >= num_exports) {
+        if (lane_idx == 0) {
+            prefix_smem[warp_idx] = 0;
+        }
+
+        return;
+    }
+
+    StateManager *state_mgr = 
+        &((StateManager *)mwGPU::GPUImplConsts::get().stateManagerAddr)[world_idx];
+
+    int32_t num_rows_export = state_mgr->getExportNumRows(export_idx);
+
+    if (lane_idx == 0) {
+        prefix_smem[warp_idx] = num_rows_export;
+    }
+
+    __syncthreads();
+
+    int32_t blocks_per_export = utils::divideRoundUp(num_worlds, 8);
+    int32_t block_slot = blockIdx.x + export_idx * blocks_per_export;
+
+    if (warp_idx == 0 && lane_idx == 0) {
         uint32_t prev_block_sum = 0;
         int32_t sum_start = export_idx * blocks_per_export;
 
-        for (int32_t i = sum_start; i < prefix_slot; i++) {
-            prev_block_sum += prefix_sums[i];
+        for (int32_t i = sum_start; i < block_slot; i++) {
+            prev_block_sum += block_sums[i];
         }
 
+        int32_t local_sum = prev_block_sum;
         for (int32_t i = 0; i < 8; i++) {
-            prefix_smem[i] += prev_block_sum;
+            int32_t cur = prefix_smem[i];
+            prefix_smem[i] = local_sum;
+            local_sum += cur;
         }
     }
 

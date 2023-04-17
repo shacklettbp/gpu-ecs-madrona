@@ -231,6 +231,7 @@ struct GPUKernels {
     CUfunction queueUserInit;
     CUfunction queueUserRun;
     CUfunction exportBarrierSetup;
+    CUfunction exportBlockSums;
     CUfunction exportCopyOut;
     CUfunction exportCopyIn;
 };
@@ -1000,6 +1001,8 @@ static GPUKernels buildKernels(const CompileConfig &cfg,
                                    compile_results.initTasksName.c_str()));
         REQ_CU(cuModuleGetFunction(&gpu_kernels.exportBarrierSetup, gpu_kernels.mod,
                                    "madronaMWGPUExportBarrierSetup"));
+        REQ_CU(cuModuleGetFunction(&gpu_kernels.exportBlockSums, gpu_kernels.mod,
+                                   "madronaMWGPUExportBlockSums"));
         REQ_CU(cuModuleGetFunction(&gpu_kernels.exportCopyOut, gpu_kernels.mod,
                                    "madronaMWGPUExportCopyOut"));
         REQ_CU(cuModuleGetFunction(&gpu_kernels.exportCopyIn, gpu_kernels.mod,
@@ -1324,14 +1327,22 @@ static GPUEngineState initEngineAndUserState(
     REQ_CUDA(cudaStreamSynchronize(strm));
 
     auto export_copyout_args = makeKernelArgBuffer(
-        (uint32_t)num_exported, export_prefix_sum_buffer,
-        export_barrier_buffer);
+        (uint32_t)num_exported, export_prefix_sum_buffer);
+
+    printf("Export copy out\n");
+
+    REQ_CU(cuLaunchKernel(gpu_kernels.exportBlockSums,
+                          threadblocks_per_export, num_exported, 1,
+                          256, 1, 1,
+                          0, strm, nullptr, export_copyout_args.data()));
 
     REQ_CU(cuLaunchKernel(gpu_kernels.exportCopyOut,
                           threadblocks_per_export, num_exported, 1,
                           256, 1, 1,
                           0, strm, nullptr, export_copyout_args.data()));
     REQ_CUDA(cudaStreamSynchronize(strm));
+
+    printf("Export copy finished\n");
 
     return GPUEngineState {
         std::move(batch_renderer),
@@ -1510,6 +1521,7 @@ static CUgraphExec makeTaskGraphRunGraph(
     const CUfunction *megakernels,
     int64_t num_megakernels,
     CUfunction export_copy_in,
+    CUfunction export_block_sums,
     CUfunction export_copy_out,
     uint32_t num_worlds,
     uint32_t num_exports,
@@ -1633,7 +1645,24 @@ static CUgraphExec makeTaskGraphRunGraph(
 
     auto export_copy_out_args = makeKernelArgBuffer(
         (uint32_t)num_exports,
-        prefix_sum_buffer, barrier_buffer);
+        prefix_sum_buffer);
+
+    CUDA_KERNEL_NODE_PARAMS block_sums_node_params {
+        .func = export_block_sums,
+        .gridDimX = num_blocks_per_export,
+        .gridDimY = num_exports,
+        .gridDimZ = 1,
+        .blockDimX = 256,
+        .blockDimY = 1,
+        .blockDimZ = 1,
+        .sharedMemBytes = 0,
+        .kernelParams = nullptr,
+        .extra = export_copy_out_args.data(),
+    };
+
+    CUgraphNode export_block_sums_node;
+    REQ_CU(cuGraphAddKernelNode(&export_block_sums_node, run_graph,
+        &megakernel_launches.back(), 1, &block_sums_node_params));
 
     CUDA_KERNEL_NODE_PARAMS copy_out_node_params {
         .func = export_copy_out,
@@ -1650,7 +1679,7 @@ static CUgraphExec makeTaskGraphRunGraph(
 
     CUgraphNode export_copy_out_node;
     REQ_CU(cuGraphAddKernelNode(&export_copy_out_node, run_graph,
-        &megakernel_launches.back(), 1, &copy_out_node_params));
+        &export_block_sums_node, 1, &copy_out_node_params));
 
     CUgraphExec run_graph_exec;
     REQ_CU(cuGraphInstantiate(&run_graph_exec, run_graph, 0));
@@ -1716,6 +1745,7 @@ MADRONA_EXPORT MWCudaExecutor::MWCudaExecutor(
                                   gpu_kernels.megakernels.data(),
                                   gpu_kernels.megakernels.size(),
                                   gpu_kernels.exportCopyIn,
+                                  gpu_kernels.exportBlockSums,
                                   gpu_kernels.exportCopyOut,
                                   state_cfg.numWorlds,
                                   state_cfg.numExportedBuffers,
